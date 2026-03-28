@@ -1,0 +1,28 @@
+# Legacy/experimental files
+poc/
+
+# Secrets
+secrets.h
+
+# ESP-IDF build artifacts
+build/
+sdkconfig
+sdkconfig.old
+
+# Audio files
+*.raw
+*.wav
+*.bin
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Debug
+debug_recording.wav
+firebase-debug.log
+
+# IDE / tools
+.python-version
+pymakr.conf
