@@ -7,10 +7,10 @@ on:
   workflow_dispatch:
 
 env:
-  PROJECT_ID: talker
-  REGION: us-central1
+  PROJECT_ID: talker-491708
+  REGION: europe-west4
   SERVICE: talker-server
-  IMAGE: us-central1-docker.pkg.dev/talker/talker/server
+  IMAGE: europe-west4-docker.pkg.dev/talker-491708/talker/server
 
 permissions:
   contents: read

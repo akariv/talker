@@ -3,6 +3,7 @@ poc/
 
 # Secrets
 secrets.h
+.env
 
 # ESP-IDF build artifacts
 build/
