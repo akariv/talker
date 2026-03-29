@@ -175,76 +175,112 @@ static bool button_pressed(void)
 // Forward declarations
 static void poll_loop(int interval_ms, int max_retries);
 
-// ---- Record and stream upload concurrently ----
-// Uses a single persistent HTTP connection to avoid TLS handshake per chunk.
+// ---- Record + stream upload (reuse TLS connection) ----
+// Uses a persistent HTTP client with keep-alive to avoid TLS handshake per chunk.
+// Each chunk is a separate POST /upload, but over the same TCP+TLS connection.
+// /done signals the server to process the accumulated audio.
+
+static esp_http_client_handle_t persistent_client = NULL;
+
+static void ensure_persistent_client(void)
+{
+    if (persistent_client != NULL) return;
+
+    char url[256];
+    snprintf(url, sizeof(url), "%s/upload", SERVER_URL);
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .cert_pem = (const char *)server_root_ca_pem_start,
+        .timeout_ms = 15000,
+        .keep_alive_enable = true,
+    };
+    persistent_client = esp_http_client_init(&config);
+    esp_http_client_set_header(persistent_client, "X-Client-Name", CLIENT_NAME);
+    esp_http_client_set_header(persistent_client, "X-Api-Key", CLIENT_API_KEY);
+    esp_http_client_set_header(persistent_client, "Content-Type", "application/octet-stream");
+}
+
+static bool persistent_post(const char *path, const uint8_t *data, int len)
+{
+    ensure_persistent_client();
+
+    char url[256];
+    snprintf(url, sizeof(url), "%s%s", SERVER_URL, path);
+    esp_http_client_set_url(persistent_client, url);
+    esp_http_client_set_method(persistent_client, HTTP_METHOD_POST);
+
+    esp_err_t err = esp_http_client_open(persistent_client, len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "POST %s failed: %s", path, esp_err_to_name(err));
+        // Connection might be stale, destroy and recreate next time
+        esp_http_client_cleanup(persistent_client);
+        persistent_client = NULL;
+        return false;
+    }
+
+    if (len > 0 && data != NULL) {
+        esp_http_client_write(persistent_client, (const char *)data, len);
+    }
+    esp_http_client_fetch_headers(persistent_client);
+    int status = esp_http_client_get_status_code(persistent_client);
+
+    // Don't close — keep-alive reuses the connection
+    return (status >= 200 && status < 300);
+}
+
 static void record_and_upload(void)
 {
     uint8_t buf[MIC_BUF_SIZE];
     size_t bytes_read = 0;
     int max_bytes = RECORD_MAX_SECONDS * MIC_SAMPLE_RATE * 2;
     int total_sent = 0;
-    bool upload_ok = false;
 
-    gpio_set_level(LED_PIN, 1);  // LED on
+    gpio_set_level(LED_PIN, 1);
 
     // Discard stale I2S data
     i2s_channel_read(mic_handle, buf, sizeof(buf), &bytes_read, pdMS_TO_TICKS(50));
 
-    // Open a single chunked POST to /voice
-    esp_http_client_handle_t upload_client = http_init("/voice", HTTP_METHOD_POST);
-    esp_http_client_set_header(upload_client, "Content-Type", "application/octet-stream");
-
-    // TLS handshake happens here (once)
-    esp_err_t err = esp_http_client_open(upload_client, -1);  // -1 = chunked encoding
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to open connection: %s", esp_err_to_name(err));
-        goto cleanup;
-    }
+    // Warm up the TLS connection before recording starts
+    persistent_post("/ping", NULL, 0);
 
     ESP_LOGI(TAG, "Recording — speak now!");
 
-    // Stream I2S data into the open HTTP connection
+    // Stream: read I2S chunk, POST it, repeat
     while (total_sent < max_bytes) {
-        err = i2s_channel_read(mic_handle, buf, sizeof(buf),
-                               &bytes_read, portMAX_DELAY);
+        esp_err_t err = i2s_channel_read(mic_handle, buf, sizeof(buf),
+                                         &bytes_read, portMAX_DELAY);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "I2S read error: %s", esp_err_to_name(err));
             break;
         }
         if (bytes_read == 0) continue;
 
-        int written = esp_http_client_write(upload_client, (const char *)buf, bytes_read);
-        if (written < 0) {
-            ESP_LOGE(TAG, "Upload write failed");
+        if (!persistent_post("/upload", buf, bytes_read)) {
+            ESP_LOGE(TAG, "Upload chunk failed, aborting");
             break;
         }
         total_sent += bytes_read;
 
         float elapsed = (float)total_sent / (MIC_SAMPLE_RATE * 2);
-        ESP_LOGI(TAG, "  Streaming %.1fs (%d bytes)", elapsed, total_sent);
+        ESP_LOGI(TAG, "  Sent %.1fs (%d bytes)", elapsed, total_sent);
 
         if (!button_pressed()) break;
     }
 
-    if (total_sent >= 3200) {
-        // Finalize the chunked request — server processes on connection close
-        esp_http_client_fetch_headers(upload_client);
-        int status = esp_http_client_get_status_code(upload_client);
-        float duration = (float)total_sent / (MIC_SAMPLE_RATE * 2);
-        ESP_LOGI(TAG, "Recording done (%.1fs, status %d), processing...", duration, status);
-        upload_ok = (status == 202 || status == 200);
-    } else {
-        ESP_LOGW(TAG, "Recording too short (%d bytes), discarding", total_sent);
-    }
-
-cleanup:
     gpio_set_level(LED_PIN, 0);
-    esp_http_client_close(upload_client);
-    esp_http_client_cleanup(upload_client);
 
-    if (upload_ok) {
-        poll_loop(POLL_ACTIVE_INTERVAL_MS, POLL_ACTIVE_RETRIES);
+    if (total_sent < 3200) {
+        ESP_LOGW(TAG, "Too short (%d bytes), discarding", total_sent);
+        return;
     }
+
+    float duration = (float)total_sent / (MIC_SAMPLE_RATE * 2);
+    ESP_LOGI(TAG, "Recording done (%.1fs). Processing...", duration);
+
+    persistent_post("/done", NULL, 0);
+
+    poll_loop(POLL_ACTIVE_INTERVAL_MS, POLL_ACTIVE_RETRIES);
 }
 
 // ---- DAC Playback ----

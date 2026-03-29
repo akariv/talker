@@ -1,6 +1,7 @@
 """FastAPI voice AI server for ESP32 intercom."""
 
 import logging
+from collections import defaultdict
 
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 
@@ -14,21 +15,50 @@ log = logging.getLogger(__name__)
 
 app = FastAPI(title="Talker Voice Server")
 
+# Per-client upload buffers for chunked recording
+upload_buffers: dict[str, bytearray] = defaultdict(bytearray)
+
+
+@app.post("/ping")
+async def ping(request: Request):
+    """Health check / TLS warmup endpoint."""
+    await auth.authenticate(request)
+    return Response(status_code=200)
+
+
+@app.post("/upload")
+async def upload(request: Request):
+    """Receive an audio chunk and append to the client's buffer."""
+    client_name = await auth.authenticate(request)
+    chunk = await request.body()
+    upload_buffers[client_name].extend(chunk)
+    total = len(upload_buffers[client_name])
+    secs = total / (16000 * 2)
+    log.info(f"[{client_name}] Chunk: {len(chunk)} bytes | Total: {total} ({secs:.1f}s)")
+    return Response(status_code=200)
+
+
+@app.post("/done")
+async def done(request: Request, background_tasks: BackgroundTasks):
+    """Signal recording is complete. Triggers the voice processing pipeline."""
+    client_name = await auth.authenticate(request)
+    pcm_data = bytes(upload_buffers.pop(client_name, bytearray()))
+    secs = len(pcm_data) / (16000 * 2)
+    log.info(f"[{client_name}] Recording complete: {len(pcm_data)} bytes ({secs:.1f}s)")
+
+    if len(pcm_data) < 3200:
+        log.warning(f"[{client_name}] Recording too short, ignoring")
+        return Response(status_code=200)
+
+    background_tasks.add_task(pipeline.process_voice, client_name, pcm_data)
+    return Response(status_code=202)
+
 
 @app.post("/voice")
 async def voice(request: Request, background_tasks: BackgroundTasks):
-    """Receive a voice recording (raw 16-bit 16kHz mono PCM) and process it.
-
-    Supports both fixed Content-Length and chunked Transfer-Encoding.
-    """
+    """Single-POST alternative: send full recording in one request."""
     client_name = await auth.authenticate(request)
-
-    # Read body via streaming to support chunked encoding
-    chunks = []
-    async for chunk in request.stream():
-        chunks.append(chunk)
-    pcm_data = b"".join(chunks)
-
+    pcm_data = await request.body()
     secs = len(pcm_data) / (16000 * 2)
     log.info(f"[{client_name}] Voice message: {len(pcm_data)} bytes ({secs:.1f}s)")
 
