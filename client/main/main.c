@@ -183,6 +183,7 @@ static void record_and_upload(void)
     size_t bytes_read = 0;
     int max_bytes = RECORD_MAX_SECONDS * MIC_SAMPLE_RATE * 2;
     int total_sent = 0;
+    bool upload_ok = false;
 
     gpio_set_level(LED_PIN, 1);  // LED on
 
@@ -193,18 +194,16 @@ static void record_and_upload(void)
     esp_http_client_handle_t upload_client = http_init("/voice", HTTP_METHOD_POST);
     esp_http_client_set_header(upload_client, "Content-Type", "application/octet-stream");
 
-    // Open connection first (does TLS handshake once)
+    // TLS handshake happens here (once)
     esp_err_t err = esp_http_client_open(upload_client, -1);  // -1 = chunked encoding
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to open upload connection: %s", esp_err_to_name(err));
-        esp_http_client_cleanup(upload_client);
-        gpio_set_level(LED_PIN, 0);
-        return;
+        ESP_LOGE(TAG, "Failed to open connection: %s", esp_err_to_name(err));
+        goto cleanup;
     }
 
     ESP_LOGI(TAG, "Recording — speak now!");
 
-    // Record + stream: read I2S and write to the open connection
+    // Stream I2S data into the open HTTP connection
     while (total_sent < max_bytes) {
         err = i2s_channel_read(mic_handle, buf, sizeof(buf),
                                &bytes_read, portMAX_DELAY);
@@ -227,23 +226,25 @@ static void record_and_upload(void)
         if (!button_pressed()) break;
     }
 
-    gpio_set_level(LED_PIN, 0);  // LED off
+    if (total_sent >= 3200) {
+        // Finalize the chunked request — server processes on connection close
+        esp_http_client_fetch_headers(upload_client);
+        int status = esp_http_client_get_status_code(upload_client);
+        float duration = (float)total_sent / (MIC_SAMPLE_RATE * 2);
+        ESP_LOGI(TAG, "Recording done (%.1fs, status %d), processing...", duration, status);
+        upload_ok = (status == 202 || status == 200);
+    } else {
+        ESP_LOGW(TAG, "Recording too short (%d bytes), discarding", total_sent);
+    }
 
-    // Close the chunked upload
-    esp_http_client_fetch_headers(upload_client);
+cleanup:
+    gpio_set_level(LED_PIN, 0);
     esp_http_client_close(upload_client);
     esp_http_client_cleanup(upload_client);
 
-    if (total_sent < 3200) {
-        ESP_LOGW(TAG, "Recording too short (%d bytes), discarding", total_sent);
-        return;
+    if (upload_ok) {
+        poll_loop(POLL_ACTIVE_INTERVAL_MS, POLL_ACTIVE_RETRIES);
     }
-
-    float duration = (float)total_sent / (MIC_SAMPLE_RATE * 2);
-    ESP_LOGI(TAG, "Recording done (%.1fs), processing...", duration);
-
-    // Poll rapidly for AI response
-    poll_loop(POLL_ACTIVE_INTERVAL_MS, POLL_ACTIVE_RETRIES);
 }
 
 // ---- DAC Playback ----

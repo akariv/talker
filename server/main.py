@@ -17,9 +17,18 @@ app = FastAPI(title="Talker Voice Server")
 
 @app.post("/voice")
 async def voice(request: Request, background_tasks: BackgroundTasks):
-    """Receive a voice recording (raw 16-bit 16kHz mono PCM) and process it."""
+    """Receive a voice recording (raw 16-bit 16kHz mono PCM) and process it.
+
+    Supports both fixed Content-Length and chunked Transfer-Encoding.
+    """
     client_name = await auth.authenticate(request)
-    pcm_data = await request.body()
+
+    # Read body via streaming to support chunked encoding
+    chunks = []
+    async for chunk in request.stream():
+        chunks.append(chunk)
+    pcm_data = b"".join(chunks)
+
     secs = len(pcm_data) / (16000 * 2)
     log.info(f"[{client_name}] Voice message: {len(pcm_data)} bytes ({secs:.1f}s)")
 
