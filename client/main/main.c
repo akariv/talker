@@ -8,7 +8,6 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_http_client.h"
-#include "esp_crt_bundle.h"
 #include "driver/gpio.h"
 #include "driver/i2s_std.h"
 #include "driver/dac_continuous.h"
@@ -86,6 +85,10 @@ static void wifi_init(void)
                         pdFALSE, pdTRUE, portMAX_DELAY);
 }
 
+// ---- Embedded root CA for Cloud Run (GTS Root R1) ----
+extern const uint8_t server_root_ca_pem_start[] asm("_binary_server_root_ca_pem_start");
+extern const uint8_t server_root_ca_pem_end[]   asm("_binary_server_root_ca_pem_end");
+
 // ---- HTTP helpers ----
 static esp_http_client_handle_t http_init(const char *path, esp_http_client_method_t method)
 {
@@ -94,7 +97,8 @@ static esp_http_client_handle_t http_init(const char *path, esp_http_client_meth
 
     esp_http_client_config_t config = {
         .url = url,
-        .crt_bundle_attach = esp_crt_bundle_attach,
+        .cert_pem = (const char *)server_root_ca_pem_start,
+        .timeout_ms = 15000,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
 
@@ -150,6 +154,13 @@ static void mic_init(void)
     ESP_LOGI(TAG, "Mic initialized (I2S RX, 16-bit mono, %d Hz)", MIC_SAMPLE_RATE);
 }
 
+static void mic_deinit(void)
+{
+    i2s_channel_disable(mic_handle);
+    i2s_del_channel(mic_handle);
+    mic_handle = NULL;
+}
+
 // ---- Button + LED ----
 static void gpio_init(void)
 {
@@ -192,20 +203,30 @@ static void record_and_upload(void)
     int total_sent = 0;
 
     gpio_set_level(LED_PIN, 1);  // LED on
-    http_post("/reset", NULL, 0);
 
-    ESP_LOGI(TAG, "Recording (hold button)...");
+    // Discard any stale data in the I2S buffer
+    i2s_channel_read(mic_handle, buf, sizeof(buf), &bytes_read, pdMS_TO_TICKS(50));
 
-    while (button_pressed() && total_sent < max_bytes) {
+    ESP_LOGI(TAG, "Recording — speak now!");
+
+    while (total_sent < max_bytes) {
+        // Read with a short timeout so we can check the button between reads
         esp_err_t err = i2s_channel_read(mic_handle, buf, sizeof(buf),
-                                         &bytes_read, pdMS_TO_TICKS(100));
-        if (err != ESP_OK || bytes_read == 0) continue;
+                                         &bytes_read, portMAX_DELAY);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "I2S read error: %s", esp_err_to_name(err));
+            break;
+        }
+        if (bytes_read == 0) continue;
 
         http_post("/upload", buf, bytes_read);
         total_sent += bytes_read;
 
         float elapsed = (float)total_sent / (MIC_SAMPLE_RATE * 2);
         ESP_LOGI(TAG, "  Sent %d bytes (%.1fs)", total_sent, elapsed);
+
+        // Check button after each chunk upload
+        if (!button_pressed()) break;
     }
 
     gpio_set_level(LED_PIN, 0);  // LED off
@@ -220,6 +241,7 @@ static void record_and_upload(void)
 
     // Poll rapidly for AI response
     poll_loop(POLL_ACTIVE_INTERVAL_MS, POLL_ACTIVE_RETRIES);
+
 }
 
 // ---- DAC Playback ----
@@ -284,8 +306,8 @@ static void play_audio(esp_http_client_handle_t client, int content_length)
 }
 
 // ---- Poll + play ----
-// Returns true if a message was played (caller may want to keep polling)
-static bool poll_once(void)
+// Returns: 1 = message played, 0 = no message (204), -1 = error
+static int poll_once(void)
 {
     esp_http_client_handle_t client = http_init("/poll", HTTP_METHOD_GET);
 
@@ -293,21 +315,28 @@ static bool poll_once(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "GET /poll failed: %s", esp_err_to_name(err));
         esp_http_client_cleanup(client);
-        return false;
+        return -1;
     }
 
     int content_length = esp_http_client_fetch_headers(client);
     int status = esp_http_client_get_status_code(client);
-    bool got_message = false;
+    int result = 0;
 
     if (status == 200 && content_length > 0) {
+        mic_deinit();
         play_audio(client, content_length);
-        got_message = true;
+        mic_init();
+        result = 1;
+    } else if (status == 204) {
+        result = 0;
+    } else {
+        ESP_LOGW(TAG, "Poll returned status %d", status);
+        result = -1;
     }
 
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
-    return got_message;
+    return result;
 }
 
 static void poll_loop(int interval_ms, int max_retries)
@@ -315,7 +344,8 @@ static void poll_loop(int interval_ms, int max_retries)
     int empty_count = 0;
 
     while (empty_count < max_retries) {
-        if (poll_once()) {
+        int result = poll_once();
+        if (result == 1) {
             empty_count = 0;  // reset on message received
         } else {
             empty_count++;
@@ -344,16 +374,18 @@ void app_main(void)
     ESP_LOGI(TAG, "Client '%s' ready. Press button to record.", CLIENT_NAME);
 
     while (1) {
-        // Check for incoming messages
-        while (poll_once()) {
-            // Keep draining the queue
-        }
+        // Check for incoming messages — drain queue, tolerate errors
+        int result;
+        do {
+            result = poll_once();
+        } while (result == 1);  // keep going while messages arrive
 
         // Check button — debounce with a small delay
         if (button_pressed()) {
-            vTaskDelay(pdMS_TO_TICKS(50));  // debounce
+            vTaskDelay(pdMS_TO_TICKS(50));
             if (button_pressed()) {
                 record_and_upload();
+                continue;  // skip idle wait, poll immediately for response
             }
         }
 
@@ -361,7 +393,7 @@ void app_main(void)
         for (int i = 0; i < POLL_IDLE_INTERVAL_MS / 100; i++) {
             vTaskDelay(pdMS_TO_TICKS(100));
             if (button_pressed()) {
-                vTaskDelay(pdMS_TO_TICKS(50));  // debounce
+                vTaskDelay(pdMS_TO_TICKS(50));
                 if (button_pressed()) {
                     record_and_upload();
                     break;

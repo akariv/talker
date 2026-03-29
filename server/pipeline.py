@@ -93,7 +93,26 @@ def pcm_to_wav_bytes(pcm_data: bytes, rate: int = 16000) -> bytes:
 
 def transcribe(pcm_data: bytes) -> str:
     """Transcribe raw PCM audio using OpenAI Whisper."""
+    import struct
+    num_samples = len(pcm_data) // 2
+    if num_samples > 0:
+        samples = struct.unpack(f"<{num_samples}h", pcm_data)
+        peak = max(abs(s) for s in samples)
+        rms = int((sum(s*s for s in samples) / num_samples) ** 0.5)
+        log.info(f"Audio stats: {len(pcm_data)} bytes, {num_samples/16000:.1f}s, peak={peak}/32767, RMS={rms}")
+    else:
+        log.warning("Empty audio data")
+
     wav_bytes = pcm_to_wav_bytes(pcm_data)
+
+    # Save debug WAV
+    try:
+        with open("/tmp/talker_last_recording.wav", "wb") as f:
+            f.write(wav_bytes)
+        log.info("Saved debug recording to /tmp/talker_last_recording.wav")
+    except Exception:
+        pass
+
     client = openai.OpenAI()
     result = client.audio.transcriptions.create(
         model="whisper-1",
