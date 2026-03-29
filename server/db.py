@@ -27,10 +27,12 @@ _mem_conversations: dict[str, list[dict]] = defaultdict(list)
 _mem_queue: dict[str, list[dict]] = defaultdict(list)
 
 
-def add_client(name: str, api_key: str, system_prompt: str = ""):
+def add_client(name: str, api_key: str, location: str = "", owner: str = "", system_prompt: str = ""):
     """Register a client (for setup/seeding)."""
     rec = {
         "api_key": api_key,
+        "location": location,
+        "owner": owner,
         "system_prompt": system_prompt,
         "created_at": time.time(),
     }
@@ -45,6 +47,19 @@ def get_client(name: str) -> dict | None:
         doc = _firestore_db.collection("clients").document(name).get()
         return doc.to_dict() if doc.exists else None
     return _mem_clients.get(name)
+
+
+def get_all_clients() -> list[dict]:
+    """Return all clients with their name, location, and owner."""
+    if USE_FIRESTORE:
+        docs = _firestore_db.collection("clients").get()
+        results = []
+        for doc in docs:
+            d = doc.to_dict()
+            d["name"] = doc.id
+            results.append(d)
+        return results
+    return [{"name": k, **v} for k, v in _mem_clients.items()]
 
 
 def get_conversation(client_name: str, limit: int = 50) -> list[dict]:

@@ -98,7 +98,9 @@ async def poll(request: Request):
 
 @app.on_event("startup")
 async def startup():
-    """Seed a test client for local development."""
-    if not db.USE_FIRESTORE and not db.get_client("test"):
-        db.add_client("test", "testkey")
-        log.info("Seeded test client: name='test', api_key='testkey'")
+    """Seed test clients for local development."""
+    if not db.USE_FIRESTORE and not db.get_client("kitchen"):
+        db.add_client("kitchen", "testkey", location="Kitchen")
+        db.add_client("alice-room", "testkey", location="Alice's room", owner="Alice")
+        db.add_client("bob-room", "testkey", location="Bob's room", owner="Bob")
+        log.info("Seeded test clients: kitchen, alice-room, bob-room")

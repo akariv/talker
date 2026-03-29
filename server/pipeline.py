@@ -14,25 +14,70 @@ log = logging.getLogger(__name__)
 
 SAY_TOOL = {
     "name": "say",
-    "description": "Speak a message to the user through the intercom speaker.",
+    "description": (
+        "Send a spoken message to a specific intercom client. "
+        "You can send messages to the client that sent the original message, "
+        "or to any other client in the system."
+    ),
     "input_schema": {
         "type": "object",
         "properties": {
+            "client_id": {
+                "type": "string",
+                "description": "The ID of the client to send the message to",
+            },
             "text": {
                 "type": "string",
-                "description": "The text to speak aloud",
-            }
+                "description": "The text to speak aloud on that client's speaker",
+            },
         },
-        "required": ["text"],
+        "required": ["client_id", "text"],
     },
 }
 
-DEFAULT_SYSTEM_PROMPT = (
-    "You are a voice assistant on an ESP32 intercom device. "
-    "Use the 'say' tool to speak your responses to the user. "
-    "Keep responses concise and conversational — the user is listening, not reading. "
-    "You may call 'say' multiple times to break up longer responses."
-)
+# Shared conversation key — all clients share one conversation so the LLM
+# has full context of all interactions across the house.
+GLOBAL_CONVERSATION = "global"
+
+
+def build_system_prompt(sender_name: str) -> str:
+    """Build a system prompt that includes sender info and all available clients."""
+    clients = db.get_all_clients()
+    sender = db.get_client(sender_name) or {}
+
+    client_lines = []
+    for c in clients:
+        parts = [f"id={c['name']}"]
+        if c.get("location"):
+            parts.append(f"location={c['location']}")
+        if c.get("owner"):
+            parts.append(f"owner={c['owner']}")
+        client_lines.append(", ".join(parts))
+
+    clients_list = "\n".join(f"  - {line}" for line in client_lines)
+
+    sender_desc = sender_name
+    if sender.get("location"):
+        sender_desc += f" (in {sender['location']})"
+    if sender.get("owner"):
+        sender_desc += f", belongs to {sender['owner']}"
+
+    custom_prompt = sender.get("system_prompt", "")
+
+    return (
+        "You are a smart home voice assistant connected to an intercom system. "
+        "Multiple intercom clients are installed in different rooms. "
+        "Use the 'say' tool to send spoken messages to specific clients.\n\n"
+        f"The current message was sent from: {sender_desc}\n\n"
+        f"Available intercom clients:\n{clients_list}\n\n"
+        "Guidelines:\n"
+        "- Keep responses concise and conversational — users are listening, not reading.\n"
+        "- You can send messages to multiple clients in one response.\n"
+        "- When someone asks you to relay a message, send it to the appropriate client(s).\n"
+        "- When answering a question, respond to the client that asked.\n"
+        "- You may call 'say' multiple times to send to different clients.\n"
+        + (f"\nAdditional instructions: {custom_prompt}" if custom_prompt else "")
+    )
 
 
 def pcm_to_wav_bytes(pcm_data: bytes, rate: int = 16000) -> bytes:
@@ -59,21 +104,21 @@ def transcribe(pcm_data: bytes) -> str:
     return text
 
 
-def run_llm(client_name: str, user_text: str) -> list[str]:
-    """Send user message to Claude with say tool, return list of say texts."""
-    # Get client config for custom system prompt
-    client_config = db.get_client(client_name)
-    system_prompt = (client_config or {}).get("system_prompt") or DEFAULT_SYSTEM_PROMPT
+def run_llm(sender_name: str, user_text: str) -> list[tuple[str, str]]:
+    """Send user message to Claude with say tool.
 
-    # Build conversation history
-    history = db.get_conversation(client_name)
+    Returns list of (client_id, text) tuples.
+    """
+    system_prompt = build_system_prompt(sender_name)
+
+    # Build conversation history (shared across all clients)
+    history = db.get_conversation(GLOBAL_CONVERSATION)
     messages = [{"role": m["role"], "content": m["content"]} for m in history]
-    messages.append({"role": "user", "content": user_text})
+    messages.append({"role": "user", "content": f"[from {sender_name}] {user_text}"})
 
     client = anthropic.Anthropic()
-    say_texts = []
+    say_messages: list[tuple[str, str]] = []
 
-    # Loop to handle tool_use responses
     while True:
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
@@ -83,53 +128,57 @@ def run_llm(client_name: str, user_text: str) -> list[str]:
             messages=messages,
         )
 
-        # Collect say tool calls and build tool_result responses
         tool_results = []
         for block in response.content:
             if block.type == "tool_use" and block.name == "say":
+                target = block.input.get("client_id", sender_name)
                 text = block.input.get("text", "")
                 if text:
-                    say_texts.append(text)
-                    log.info(f"say: {text!r}")
+                    say_messages.append((target, text))
+                    log.info(f"say -> {target}: {text!r}")
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
-                    "content": "Message queued for playback.",
+                    "content": f"Message queued for {target}.",
                 })
 
         if response.stop_reason == "tool_use" and tool_results:
-            # Add assistant response + tool results, continue the loop
             messages.append({"role": "assistant", "content": response.content})
             messages.append({"role": "user", "content": tool_results})
         else:
             break
 
-    return say_texts
+    return say_messages
 
 
-def process_voice(client_name: str, pcm_data: bytes):
-    """Full pipeline: transcribe → LLM → enqueue responses."""
-    # Transcribe
+def process_voice(sender_name: str, pcm_data: bytes):
+    """Full pipeline: transcribe → LLM → enqueue responses to target clients."""
     text = transcribe(pcm_data)
     if not text:
-        log.warning(f"Empty transcription for {client_name}")
-        db.enqueue_response(client_name, "I didn't catch that, could you try again?", 0)
+        log.warning(f"Empty transcription from {sender_name}")
+        db.enqueue_response(sender_name, "I didn't catch that, could you try again?", 0)
         return
 
-    # Save user message
-    db.append_message(client_name, "user", text)
+    # Save user message to shared conversation
+    db.append_message(GLOBAL_CONVERSATION, "user", f"[from {sender_name}] {text}")
 
     # Run LLM
-    say_texts = run_llm(client_name, text)
+    say_messages = run_llm(sender_name, text)
 
-    if not say_texts:
-        say_texts = ["I'm not sure what to say to that."]
+    if not say_messages:
+        say_messages = [(sender_name, "I'm not sure what to say to that.")]
 
-    # Enqueue responses and save assistant message
-    full_response = " ".join(say_texts)
-    db.append_message(client_name, "assistant", full_response)
+    # Save assistant response to shared conversation
+    summary = "; ".join(f"[to {cid}] {t}" for cid, t in say_messages)
+    db.append_message(GLOBAL_CONVERSATION, "assistant", summary)
 
-    for i, t in enumerate(say_texts):
-        db.enqueue_response(client_name, t, sequence=i)
+    # Enqueue responses to their target clients
+    # Group by client_id to maintain per-client sequence ordering
+    per_client: dict[str, list[str]] = {}
+    for client_id, msg_text in say_messages:
+        per_client.setdefault(client_id, []).append(msg_text)
 
-    log.info(f"Queued {len(say_texts)} response(s) for {client_name}")
+    for client_id, texts in per_client.items():
+        for i, t in enumerate(texts):
+            db.enqueue_response(client_id, t, sequence=i)
+        log.info(f"Queued {len(texts)} message(s) for {client_id}")
