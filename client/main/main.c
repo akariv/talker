@@ -22,9 +22,9 @@ static const char *TAG = "intercom";
 #define DAC_GAIN             15
 #define RECORD_MAX_SECONDS   30
 
-#define POLL_IDLE_INTERVAL_MS   10000  // 10s between polls when idle
-#define POLL_ACTIVE_INTERVAL_MS 1000   // 1s between polls after sending
-#define POLL_ACTIVE_RETRIES     30     // rapid polls after sending
+#define POLL_IDLE_INTERVAL_MS   10000
+#define POLL_ACTIVE_INTERVAL_MS 1000
+#define POLL_ACTIVE_RETRIES     30
 
 // I2S mic pins
 #define MIC_SCK_PIN  33
@@ -45,6 +45,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
         ESP_LOGW(TAG, "Disconnected, retrying...");
         esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
@@ -85,28 +86,64 @@ static void wifi_init(void)
                         pdFALSE, pdTRUE, portMAX_DELAY);
 }
 
+static bool wifi_connected(void)
+{
+    return (xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT) != 0;
+}
+
 // ---- Embedded root CA for Cloud Run (GTS Root R1) ----
 extern const uint8_t server_root_ca_pem_start[] asm("_binary_server_root_ca_pem_start");
 extern const uint8_t server_root_ca_pem_end[]   asm("_binary_server_root_ca_pem_end");
 
-// ---- HTTP helpers ----
-static esp_http_client_handle_t http_init(const char *path, esp_http_client_method_t method)
+// ---- Single persistent HTTP client ----
+// One client with keep-alive for all requests. TLS session is cached
+// so switching between URLs doesn't require a new handshake.
+static esp_http_client_handle_t http_client = NULL;
+
+static void ensure_http_client(void)
 {
+    if (http_client != NULL) return;
+
     char url[256];
-    snprintf(url, sizeof(url), "%s%s", SERVER_URL, path);
+    snprintf(url, sizeof(url), "%s/poll", SERVER_URL);
 
     esp_http_client_config_t config = {
         .url = url,
         .cert_pem = (const char *)server_root_ca_pem_start,
         .timeout_ms = 15000,
+        .keep_alive_enable = true,
     };
-    esp_http_client_handle_t client = esp_http_client_init(&config);
+    http_client = esp_http_client_init(&config);
+    esp_http_client_set_header(http_client, "X-Client-Name", CLIENT_NAME);
+    esp_http_client_set_header(http_client, "X-Api-Key", CLIENT_API_KEY);
+    esp_http_client_set_header(http_client, "Content-Type", "application/octet-stream");
+}
 
-    esp_http_client_set_method(client, method);
-    esp_http_client_set_header(client, "X-Client-Name", CLIENT_NAME);
-    esp_http_client_set_header(client, "X-Api-Key", CLIENT_API_KEY);
+static void reset_http_client(void)
+{
+    if (http_client != NULL) {
+        esp_http_client_close(http_client);
+        esp_http_client_cleanup(http_client);
+        http_client = NULL;
+        ESP_LOGI(TAG, "HTTP client reset. Free heap: %lu bytes", esp_get_free_heap_size());
+    }
+}
 
-    return client;
+// ---- Chunked encoding helpers ----
+static int write_chunk(const char *data, int len)
+{
+    char header[16];
+    int hlen = snprintf(header, sizeof(header), "%x\r\n", len);
+
+    if (esp_http_client_write(http_client, header, hlen) < 0) return -1;
+    if (len > 0 && esp_http_client_write(http_client, data, len) < 0) return -1;
+    if (esp_http_client_write(http_client, "\r\n", 2) < 0) return -1;
+    return len;
+}
+
+static int write_chunk_end(void)
+{
+    return esp_http_client_write(http_client, "0\r\n\r\n", 5);
 }
 
 // ---- I2S Mic ----
@@ -145,7 +182,6 @@ static void mic_deinit(void)
 // ---- Button + LED ----
 static void gpio_init(void)
 {
-    // Button: input with internal pull-up (active low)
     gpio_config_t btn_cfg = {
         .pin_bit_mask = (1ULL << BUTTON_PIN),
         .mode = GPIO_MODE_INPUT,
@@ -155,7 +191,6 @@ static void gpio_init(void)
     };
     ESP_ERROR_CHECK(gpio_config(&btn_cfg));
 
-    // LED: output
     gpio_config_t led_cfg = {
         .pin_bit_mask = (1ULL << LED_PIN),
         .mode = GPIO_MODE_OUTPUT,
@@ -169,122 +204,92 @@ static void gpio_init(void)
 
 static bool button_pressed(void)
 {
-    return gpio_get_level(BUTTON_PIN) == 0;  // active low
+    return gpio_get_level(BUTTON_PIN) == 0;
 }
 
-// Forward declarations
+// ---- Forward declarations ----
 static void poll_loop(int interval_ms, int max_retries);
 
-// ---- Record + stream upload (reuse TLS connection) ----
-// Uses a persistent HTTP client with keep-alive to avoid TLS handshake per chunk.
-// Each chunk is a separate POST /upload, but over the same TCP+TLS connection.
-// /done signals the server to process the accumulated audio.
-
-static esp_http_client_handle_t persistent_client = NULL;
-
-static void ensure_persistent_client(void)
-{
-    if (persistent_client != NULL) return;
-
-    char url[256];
-    snprintf(url, sizeof(url), "%s/upload", SERVER_URL);
-
-    esp_http_client_config_t config = {
-        .url = url,
-        .cert_pem = (const char *)server_root_ca_pem_start,
-        .timeout_ms = 15000,
-        .keep_alive_enable = true,
-    };
-    persistent_client = esp_http_client_init(&config);
-    esp_http_client_set_header(persistent_client, "X-Client-Name", CLIENT_NAME);
-    esp_http_client_set_header(persistent_client, "X-Api-Key", CLIENT_API_KEY);
-    esp_http_client_set_header(persistent_client, "Content-Type", "application/octet-stream");
-}
-
-static bool persistent_post(const char *path, const uint8_t *data, int len)
-{
-    ensure_persistent_client();
-
-    char url[256];
-    snprintf(url, sizeof(url), "%s%s", SERVER_URL, path);
-    esp_http_client_set_url(persistent_client, url);
-    esp_http_client_set_method(persistent_client, HTTP_METHOD_POST);
-
-    esp_err_t err = esp_http_client_open(persistent_client, len);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "POST %s failed: %s", path, esp_err_to_name(err));
-        // Connection might be stale, destroy and recreate next time
-        esp_http_client_cleanup(persistent_client);
-        persistent_client = NULL;
-        return false;
-    }
-
-    if (len > 0 && data != NULL) {
-        esp_http_client_write(persistent_client, (const char *)data, len);
-    }
-    esp_http_client_fetch_headers(persistent_client);
-    int status = esp_http_client_get_status_code(persistent_client);
-
-    // Don't close — keep-alive reuses the connection
-    return (status >= 200 && status < 300);
-}
-
+// ---- Record + stream via chunked POST ----
 static void record_and_upload(void)
 {
     uint8_t buf[MIC_BUF_SIZE];
     size_t bytes_read = 0;
     int max_bytes = RECORD_MAX_SECONDS * MIC_SAMPLE_RATE * 2;
     int total_sent = 0;
+    bool upload_ok = false;
 
     gpio_set_level(LED_PIN, 1);
 
     // Discard stale I2S data
     i2s_channel_read(mic_handle, buf, sizeof(buf), &bytes_read, pdMS_TO_TICKS(50));
 
-    // Warm up the TLS connection before recording starts
-    persistent_post("/ping", NULL, 0);
+    // Open chunked POST to /voice
+    ensure_http_client();
+    char url[256];
+    snprintf(url, sizeof(url), "%s/voice", SERVER_URL);
+    esp_http_client_set_url(http_client, url);
+    esp_http_client_set_method(http_client, HTTP_METHOD_POST);
+
+    esp_err_t err = esp_http_client_open(http_client, -1);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open voice connection: %s", esp_err_to_name(err));
+        reset_http_client();
+        gpio_set_level(LED_PIN, 0);
+        return;
+    }
 
     ESP_LOGI(TAG, "Recording — speak now!");
 
-    // Stream: read I2S chunk, POST it, repeat
     while (total_sent < max_bytes) {
-        esp_err_t err = i2s_channel_read(mic_handle, buf, sizeof(buf),
-                                         &bytes_read, portMAX_DELAY);
+        err = i2s_channel_read(mic_handle, buf, sizeof(buf),
+                               &bytes_read, portMAX_DELAY);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "I2S read error: %s", esp_err_to_name(err));
             break;
         }
         if (bytes_read == 0) continue;
 
-        if (!persistent_post("/upload", buf, bytes_read)) {
-            ESP_LOGE(TAG, "Upload chunk failed, aborting");
+        if (write_chunk((const char *)buf, bytes_read) < 0) {
+            ESP_LOGE(TAG, "Stream write failed");
+            reset_http_client();
             break;
         }
         total_sent += bytes_read;
-
-        float elapsed = (float)total_sent / (MIC_SAMPLE_RATE * 2);
-        ESP_LOGI(TAG, "  Sent %.1fs (%d bytes)", elapsed, total_sent);
 
         if (!button_pressed()) break;
     }
 
     gpio_set_level(LED_PIN, 0);
 
-    if (total_sent < 3200) {
-        ESP_LOGW(TAG, "Too short (%d bytes), discarding", total_sent);
-        return;
+    float duration = (float)total_sent / (MIC_SAMPLE_RATE * 2);
+    ESP_LOGI(TAG, "Recorded %.1fs (%d bytes)", duration, total_sent);
+
+    if (http_client != NULL && total_sent >= 3200) {
+        write_chunk_end();
+        esp_http_client_fetch_headers(http_client);
+        int status = esp_http_client_get_status_code(http_client);
+        esp_http_client_close(http_client);
+
+        if (status == 200 || status == 202) {
+            ESP_LOGI(TAG, "Upload done (status %d, heap: %lu), processing...",
+                     status, esp_get_free_heap_size());
+            upload_ok = true;
+        } else {
+            ESP_LOGE(TAG, "Upload failed (status %d)", status);
+        }
+    } else {
+        if (http_client != NULL) esp_http_client_close(http_client);
+        if (total_sent < 3200) ESP_LOGW(TAG, "Too short, discarding");
     }
 
-    float duration = (float)total_sent / (MIC_SAMPLE_RATE * 2);
-    ESP_LOGI(TAG, "Recording done (%.1fs). Processing...", duration);
-
-    persistent_post("/done", NULL, 0);
-
-    poll_loop(POLL_ACTIVE_INTERVAL_MS, POLL_ACTIVE_RETRIES);
+    if (upload_ok) {
+        poll_loop(POLL_ACTIVE_INTERVAL_MS, POLL_ACTIVE_RETRIES);
+    }
 }
 
 // ---- DAC Playback ----
-static void play_audio(esp_http_client_handle_t client, int content_length)
+static void play_audio(int content_length)
 {
     dac_continuous_handle_t dac_handle;
     dac_continuous_config_t dac_cfg = {
@@ -312,7 +317,7 @@ static void play_audio(esp_http_client_handle_t client, int content_length)
             to_read = content_length - bytes_played;
         }
 
-        int n = esp_http_client_read(client, (char *)read_buf + leftover, to_read);
+        int n = esp_http_client_read(http_client, (char *)read_buf + leftover, to_read);
         if (n <= 0) break;
 
         int available = leftover + n;
@@ -342,40 +347,48 @@ static void play_audio(esp_http_client_handle_t client, int content_length)
 
     dac_continuous_disable(dac_handle);
     dac_continuous_del_channels(dac_handle);
+    ESP_LOGI(TAG, "Free heap after playback: %lu bytes", esp_get_free_heap_size());
 }
 
 // ---- Poll + play ----
-// Returns: 1 = message played, 0 = no message (204), -1 = error
 static int poll_once(void)
 {
-    esp_http_client_handle_t client = http_init("/poll", HTTP_METHOD_GET);
+    if (!wifi_connected()) return -1;
 
-    esp_err_t err = esp_http_client_open(client, 0);
+    ensure_http_client();
+    char url[256];
+    snprintf(url, sizeof(url), "%s/poll", SERVER_URL);
+    esp_http_client_set_url(http_client, url);
+    esp_http_client_set_method(http_client, HTTP_METHOD_GET);
+
+    esp_err_t err = esp_http_client_open(http_client, 0);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "GET /poll failed: %s", esp_err_to_name(err));
-        esp_http_client_cleanup(client);
+        reset_http_client();
         return -1;
     }
 
-    int content_length = esp_http_client_fetch_headers(client);
-    int status = esp_http_client_get_status_code(client);
-    int result = 0;
+    int content_length = esp_http_client_fetch_headers(http_client);
+    int status = esp_http_client_get_status_code(http_client);
 
     if (status == 200 && content_length > 0) {
         mic_deinit();
-        play_audio(client, content_length);
+        play_audio(content_length);
         mic_init();
-        result = 1;
-    } else if (status == 204) {
-        result = 0;
-    } else {
-        ESP_LOGW(TAG, "Poll returned status %d", status);
-        result = -1;
+        esp_http_client_close(http_client);
+        return 1;
     }
 
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-    return result;
+    // Must read any remaining response body before closing
+    esp_http_client_close(http_client);
+
+    if (status == 204) {
+        ESP_LOGI(TAG, "Poll: no messages (heap: %lu)", esp_get_free_heap_size());
+        return 0;
+    }
+
+    ESP_LOGW(TAG, "Poll returned status %d", status);
+    return -1;
 }
 
 static void poll_loop(int interval_ms, int max_retries)
@@ -385,12 +398,11 @@ static void poll_loop(int interval_ms, int max_retries)
     while (empty_count < max_retries) {
         int result = poll_once();
         if (result == 1) {
-            empty_count = 0;  // reset on message received
+            empty_count = 0;
         } else {
             empty_count++;
         }
 
-        // Check if button pressed during polling
         if (button_pressed()) return;
 
         vTaskDelay(pdMS_TO_TICKS(interval_ms));
@@ -411,24 +423,25 @@ void app_main(void)
     mic_init();
 
     ESP_LOGI(TAG, "Client '%s' ready. Press button to record.", CLIENT_NAME);
+    ESP_LOGI(TAG, "Free heap: %lu bytes", esp_get_free_heap_size());
 
     while (1) {
-        // Check for incoming messages — drain queue, tolerate errors
+        // Poll for incoming messages
         int result;
         do {
             result = poll_once();
-        } while (result == 1);  // keep going while messages arrive
+        } while (result == 1);
 
-        // Check button — debounce with a small delay
+        // Check button
         if (button_pressed()) {
             vTaskDelay(pdMS_TO_TICKS(50));
             if (button_pressed()) {
                 record_and_upload();
-                continue;  // skip idle wait, poll immediately for response
+                continue;
             }
         }
 
-        // Wait before next poll, but check button every 100ms
+        // Idle wait — check button every 100ms
         for (int i = 0; i < POLL_IDLE_INTERVAL_MS / 100; i++) {
             vTaskDelay(pdMS_TO_TICKS(100));
             if (button_pressed()) {
