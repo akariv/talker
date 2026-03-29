@@ -1,10 +1,8 @@
 """FastAPI voice AI server for ESP32 intercom."""
 
 import logging
-from collections import defaultdict
 
 from fastapi import FastAPI, Request, Response, BackgroundTasks
-from fastapi.responses import JSONResponse
 
 import auth
 import db
@@ -16,47 +14,10 @@ log = logging.getLogger(__name__)
 
 app = FastAPI(title="Talker Voice Server")
 
-# In-memory upload buffers (per client)
-upload_buffers: dict[str, bytearray] = defaultdict(bytearray)
-
-
-@app.post("/reset")
-async def reset(request: Request):
-    client_name = await auth.authenticate(request)
-    upload_buffers[client_name] = bytearray()
-    log.info(f"[{client_name}] Buffer cleared")
-    return Response(status_code=200)
-
-
-@app.post("/upload")
-async def upload(request: Request):
-    client_name = await auth.authenticate(request)
-    chunk = await request.body()
-    upload_buffers[client_name].extend(chunk)
-    total = len(upload_buffers[client_name])
-    secs = total / (16000 * 2)
-    log.info(f"[{client_name}] Chunk: {len(chunk)} bytes | Total: {total} ({secs:.1f}s)")
-    return Response(status_code=200)
-
-
-@app.post("/done")
-async def done(request: Request, background_tasks: BackgroundTasks):
-    client_name = await auth.authenticate(request)
-    pcm_data = bytes(upload_buffers.pop(client_name, bytearray()))
-    secs = len(pcm_data) / (16000 * 2)
-    log.info(f"[{client_name}] Recording complete: {len(pcm_data)} bytes ({secs:.1f}s)")
-
-    if len(pcm_data) < 3200:  # less than 0.1s
-        log.warning(f"[{client_name}] Recording too short, ignoring")
-        return Response(status_code=200)
-
-    background_tasks.add_task(pipeline.process_voice, client_name, pcm_data)
-    return Response(status_code=202)
-
 
 @app.post("/voice")
 async def voice(request: Request, background_tasks: BackgroundTasks):
-    """Single-POST alternative: send full recording in one request."""
+    """Receive a voice recording (raw 16-bit 16kHz mono PCM) and process it."""
     client_name = await auth.authenticate(request)
     pcm_data = await request.body()
     secs = len(pcm_data) / (16000 * 2)
@@ -72,6 +33,7 @@ async def voice(request: Request, background_tasks: BackgroundTasks):
 
 @app.get("/poll")
 async def poll(request: Request):
+    """Poll for pending voice responses. Returns audio or 204."""
     client_name = await auth.authenticate(request)
 
     entry = db.poll_next_response(client_name)

@@ -109,25 +109,6 @@ static esp_http_client_handle_t http_init(const char *path, esp_http_client_meth
     return client;
 }
 
-static void http_post(const char *path, const uint8_t *data, int len)
-{
-    esp_http_client_handle_t client = http_init(path, HTTP_METHOD_POST);
-    esp_http_client_set_header(client, "Content-Type", "application/octet-stream");
-
-    esp_err_t err = esp_http_client_open(client, len);
-    if (err == ESP_OK) {
-        if (len > 0 && data != NULL) {
-            esp_http_client_write(client, (const char *)data, len);
-        }
-        esp_http_client_fetch_headers(client);
-    } else {
-        ESP_LOGE(TAG, "POST %s failed: %s", path, esp_err_to_name(err));
-    }
-
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-}
-
 // ---- I2S Mic ----
 static i2s_chan_handle_t mic_handle = NULL;
 
@@ -194,7 +175,8 @@ static bool button_pressed(void)
 // Forward declarations
 static void poll_loop(int interval_ms, int max_retries);
 
-// ---- Record while button held ----
+// ---- Record and stream upload concurrently ----
+// Uses a single persistent HTTP connection to avoid TLS handshake per chunk.
 static void record_and_upload(void)
 {
     uint8_t buf[MIC_BUF_SIZE];
@@ -204,44 +186,64 @@ static void record_and_upload(void)
 
     gpio_set_level(LED_PIN, 1);  // LED on
 
-    // Discard any stale data in the I2S buffer
+    // Discard stale I2S data
     i2s_channel_read(mic_handle, buf, sizeof(buf), &bytes_read, pdMS_TO_TICKS(50));
+
+    // Open a single chunked POST to /voice
+    esp_http_client_handle_t upload_client = http_init("/voice", HTTP_METHOD_POST);
+    esp_http_client_set_header(upload_client, "Content-Type", "application/octet-stream");
+
+    // Open connection first (does TLS handshake once)
+    esp_err_t err = esp_http_client_open(upload_client, -1);  // -1 = chunked encoding
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open upload connection: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(upload_client);
+        gpio_set_level(LED_PIN, 0);
+        return;
+    }
 
     ESP_LOGI(TAG, "Recording — speak now!");
 
+    // Record + stream: read I2S and write to the open connection
     while (total_sent < max_bytes) {
-        // Read with a short timeout so we can check the button between reads
-        esp_err_t err = i2s_channel_read(mic_handle, buf, sizeof(buf),
-                                         &bytes_read, portMAX_DELAY);
+        err = i2s_channel_read(mic_handle, buf, sizeof(buf),
+                               &bytes_read, portMAX_DELAY);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "I2S read error: %s", esp_err_to_name(err));
             break;
         }
         if (bytes_read == 0) continue;
 
-        http_post("/upload", buf, bytes_read);
+        int written = esp_http_client_write(upload_client, (const char *)buf, bytes_read);
+        if (written < 0) {
+            ESP_LOGE(TAG, "Upload write failed");
+            break;
+        }
         total_sent += bytes_read;
 
         float elapsed = (float)total_sent / (MIC_SAMPLE_RATE * 2);
-        ESP_LOGI(TAG, "  Sent %d bytes (%.1fs)", total_sent, elapsed);
+        ESP_LOGI(TAG, "  Streaming %.1fs (%d bytes)", elapsed, total_sent);
 
-        // Check button after each chunk upload
         if (!button_pressed()) break;
     }
 
     gpio_set_level(LED_PIN, 0);  // LED off
+
+    // Close the chunked upload
+    esp_http_client_fetch_headers(upload_client);
+    esp_http_client_close(upload_client);
+    esp_http_client_cleanup(upload_client);
 
     if (total_sent < 3200) {
         ESP_LOGW(TAG, "Recording too short (%d bytes), discarding", total_sent);
         return;
     }
 
-    http_post("/done", NULL, 0);
-    ESP_LOGI(TAG, "Recording complete (%d bytes), processing...", total_sent);
+    float duration = (float)total_sent / (MIC_SAMPLE_RATE * 2);
+    ESP_LOGI(TAG, "Recording done (%.1fs), processing...", duration);
 
     // Poll rapidly for AI response
     poll_loop(POLL_ACTIVE_INTERVAL_MS, POLL_ACTIVE_RETRIES);
-
 }
 
 // ---- DAC Playback ----

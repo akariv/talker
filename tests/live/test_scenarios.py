@@ -66,30 +66,18 @@ def headers(client_name: str) -> dict:
 
 
 def send_voice(client_name: str, audio_path: str):
-    """Upload audio file to server using the chunked /reset → /upload → /done flow."""
+    """Upload audio file to server via single POST to /voice."""
     print(f"  Sending from {client_name}: {audio_path}")
 
-    # Reset
-    r = requests.post(f"{SERVER}/reset", headers=headers(client_name))
-    assert r.status_code == 200, f"Reset failed: {r.status_code}"
-
-    # Upload in chunks
     with open(audio_path, "rb") as f:
         data = f.read()
 
-    chunk_size = 4096
-    for i in range(0, len(data), chunk_size):
-        chunk = data[i : i + chunk_size]
-        r = requests.post(
-            f"{SERVER}/upload",
-            headers={**headers(client_name), "Content-Type": "application/octet-stream"},
-            data=chunk,
-        )
-        assert r.status_code == 200, f"Upload failed: {r.status_code}"
-
-    # Done
-    r = requests.post(f"{SERVER}/done", headers=headers(client_name))
-    assert r.status_code == 202, f"Done failed: {r.status_code} {r.text}"
+    r = requests.post(
+        f"{SERVER}/voice",
+        headers={**headers(client_name), "Content-Type": "application/octet-stream"},
+        data=data,
+    )
+    assert r.status_code == 202, f"Voice POST failed: {r.status_code} {r.text}"
     print(f"  -> Accepted (202). Processing...")
 
 
