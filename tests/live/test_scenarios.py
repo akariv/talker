@@ -48,6 +48,13 @@ SCENARIOS = [
         "expect_responses_on": ["alice-room"],
         "description": "Bob says 'ask Alice if she wants to go to the movies' → Alice should get the message",
     },
+    {
+        "name": "Alice replies to Bob",
+        "sender": "alice-room",
+        "audio": "audio/alice_sure.raw",
+        "expect_responses_on": ["bob-room"],
+        "description": "Alice says 'sure!' → Bob should hear that Alice agreed to the movies",
+    },
 ]
 
 
@@ -113,14 +120,25 @@ def poll_responses(client_name: str, timeout: int = 30) -> list[bytes]:
     return responses
 
 
-def play_pcm(pcm_data: bytes, label: str = ""):
-    """Play raw 16-bit 16kHz mono PCM using afplay (macOS)."""
-    wav_path = "/tmp/talker_test.wav"
-    with wave.open(wav_path, "wb") as wf:
+def save_wav(pcm_data: bytes, path: str):
+    """Save raw 16-bit 16kHz mono PCM as WAV."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with wave.open(path, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(16000)
         wf.writeframes(pcm_data)
+
+
+def play_pcm(pcm_data: bytes, label: str = "", save_path: str = ""):
+    """Play raw 16-bit 16kHz mono PCM using afplay (macOS)."""
+    if save_path:
+        save_wav(pcm_data, save_path)
+        print(f"  Saved: {save_path}")
+
+    wav_path = save_path or "/tmp/talker_test.wav"
+    if not save_path:
+        save_wav(pcm_data, wav_path)
 
     if label:
         print(f"  Playing: {label}")
@@ -138,10 +156,15 @@ def drain_all_queues():
     print("  All queues empty.\n")
 
 
-def run_scenario(scenario: dict):
+def run_scenario(scenario: dict, scenario_idx: int):
+    # Slug for output directory: e.g. "01_kitchen_announces_dinner"
+    slug = f"{scenario_idx:02d}_{scenario['name'].lower().replace(' ', '_')}"
+    out_dir = os.path.join("results", slug)
+
     print(f"\n{'='*60}")
     print(f"SCENARIO: {scenario['name']}")
     print(f"  {scenario['description']}")
+    print(f"  Output: {out_dir}/")
     print(f"{'='*60}")
 
     audio_path = scenario["audio"]
@@ -168,19 +191,20 @@ def run_scenario(scenario: dict):
             all_ok = False
         else:
             for i, pcm in enumerate(responses):
-                play_pcm(pcm, label=f"{client_name} response {i+1}")
+                wav_path = os.path.join(out_dir, f"{client_name}_{i+1}.wav")
+                play_pcm(pcm, label=f"{client_name} response {i+1}", save_path=wav_path)
 
     # Also check if unexpected clients got messages
     for client_name in CLIENTS:
         if client_name in scenario["expect_responses_on"]:
             continue
         if client_name == scenario["sender"]:
-            # Sender might also get a response, that's fine
             responses = poll_responses(client_name, timeout=3)
             if responses:
                 print(f"\n  (Sender {client_name} also got {len(responses)} response(s))")
                 for i, pcm in enumerate(responses):
-                    play_pcm(pcm, label=f"{client_name} response {i+1}")
+                    wav_path = os.path.join(out_dir, f"{client_name}_{i+1}.wav")
+                    play_pcm(pcm, label=f"{client_name} response {i+1}", save_path=wav_path)
 
     return all_ok
 
@@ -196,8 +220,8 @@ def main():
     drain_all_queues()
 
     results = []
-    for scenario in SCENARIOS:
-        ok = run_scenario(scenario)
+    for i, scenario in enumerate(SCENARIOS):
+        ok = run_scenario(scenario, i + 1)
         results.append((scenario["name"], ok))
         print()
         # Small delay between scenarios

@@ -15,7 +15,7 @@ def text_to_pcm(text: str) -> bytes:
     # OpenAI TTS returns 24kHz 16-bit mono PCM with response_format="pcm"
     response = client.audio.speech.create(
         model="tts-1",
-        voice="alloy",
+        voice="shimmer",
         input=text,
         response_format="pcm",
     )

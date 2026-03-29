@@ -16,6 +16,7 @@ MESSAGES = {
     "dinner_ready.raw": "Dinner is ready!",
     "capital_of_france.raw": "What is the capital of France?",
     "ask_alice_movies.raw": "Ask Alice if she wants to go to the movies.",
+    "alice_sure.raw": "Sure!",
 }
 
 
