@@ -1,8 +1,12 @@
-# Talker — ESP32 Intercom Echo System
+# Talker — ESP32 Voice AI Intercom
 
-# Run the Python echo server
+# Run the server locally
 server:
-    python server/server.py
+    cd server && uvicorn main:app --host 0.0.0.0 --port 8080 --reload
+
+# Deploy to Cloud Run
+deploy:
+    gcloud run deploy talker-server --source server/ --region us-central1 --min-instances 1
 
 # Build ESP-IDF client firmware
 build:
@@ -27,3 +31,7 @@ setup:
 # Clean build artifacts
 clean:
     cd client && idf.py fullclean
+
+# Install server dependencies
+install:
+    pip install -r server/requirements.txt

@@ -1,1 +1,7 @@
-# No external dependencies — uses Python stdlib only
+fastapi>=0.115
+uvicorn>=0.34
+anthropic>=0.52
+openai>=1.82
+numpy>=2.2
+scipy>=1.15
+google-cloud-firestore>=2.21

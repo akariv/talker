@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_http_client.h"
+#include "esp_crt_bundle.h"
 #include "driver/i2s_std.h"
 #include "driver/dac_continuous.h"
 #include "secrets.h"
@@ -15,11 +16,13 @@
 static const char *TAG = "intercom";
 
 // ---- Config ----
-#define SERVER_PORT     8080
 #define RECORD_SECONDS  10
 #define MIC_SAMPLE_RATE 16000
 #define MIC_BUF_SIZE    4096
 #define DAC_SAMPLE_RATE 16000
+#define DAC_GAIN        15
+#define POLL_INTERVAL_MS 1000
+#define POLL_MAX_RETRIES 30
 
 // I2S mic pins
 #define MIC_SCK_PIN     33
@@ -77,15 +80,27 @@ static void wifi_init(void)
 }
 
 // ---- HTTP helpers ----
-static void http_post(const char *path, const uint8_t *data, int len)
+static esp_http_client_handle_t http_init(const char *path, esp_http_client_method_t method)
 {
-    char url[128];
-    snprintf(url, sizeof(url), "http://" SERVER_IP ":%d%s", SERVER_PORT, path);
+    char url[256];
+    snprintf(url, sizeof(url), "%s%s", SERVER_URL, path);
 
-    esp_http_client_config_t config = { .url = url };
+    esp_http_client_config_t config = {
+        .url = url,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
     esp_http_client_handle_t client = esp_http_client_init(&config);
 
-    esp_http_client_set_method(client, HTTP_METHOD_POST);
+    esp_http_client_set_method(client, method);
+    esp_http_client_set_header(client, "X-Client-Name", CLIENT_NAME);
+    esp_http_client_set_header(client, "X-Api-Key", CLIENT_API_KEY);
+
+    return client;
+}
+
+static void http_post(const char *path, const uint8_t *data, int len)
+{
+    esp_http_client_handle_t client = http_init(path, HTTP_METHOD_POST);
     esp_http_client_set_header(client, "Content-Type", "application/octet-stream");
 
     esp_err_t err = esp_http_client_open(client, len);
@@ -140,7 +155,7 @@ static void record_and_upload(void)
 {
     uint8_t buf[MIC_BUF_SIZE];
     size_t bytes_read = 0;
-    int total_bytes = RECORD_SECONDS * MIC_SAMPLE_RATE * 2; // 16-bit = 2 bytes/sample
+    int total_bytes = RECORD_SECONDS * MIC_SAMPLE_RATE * 2;
     int total_sent = 0;
 
     http_post("/reset", NULL, 0);
@@ -167,11 +182,8 @@ static void record_and_upload(void)
 }
 
 // ---- DAC Playback ----
-static void playback(void)
+static void play_audio(esp_http_client_handle_t client, int content_length)
 {
-    ESP_LOGI(TAG, "Requesting playback...");
-
-    // Init DAC continuous mode on channel 1 (GPIO 26)
     dac_continuous_handle_t dac_handle;
     dac_continuous_config_t dac_cfg = {
         .chan_mask = DAC_CHANNEL_MASK_CH1,
@@ -185,30 +197,12 @@ static void playback(void)
     ESP_ERROR_CHECK(dac_continuous_new_channels(&dac_cfg, &dac_handle));
     ESP_ERROR_CHECK(dac_continuous_enable(dac_handle));
 
-    // HTTP GET /playback in streaming mode
-    char url[128];
-    snprintf(url, sizeof(url), "http://" SERVER_IP ":%d/playback", SERVER_PORT);
-    esp_http_client_config_t config = { .url = url };
-    esp_http_client_handle_t client = esp_http_client_init(&config);
+    ESP_LOGI(TAG, "Playing %d bytes (16-bit PCM -> 8-bit DAC)", content_length);
 
-    esp_http_client_set_method(client, HTTP_METHOD_GET);
-
-    esp_err_t err = esp_http_client_open(client, 0);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "GET /playback failed: %s", esp_err_to_name(err));
-        goto cleanup;
-    }
-
-    int content_length = esp_http_client_fetch_headers(client);
-    ESP_LOGI(TAG, "Playing %d bytes (16-bit PCM, %d Hz) -> converting to 8-bit DAC",
-             content_length, DAC_SAMPLE_RATE);
-
-    // Read 16-bit PCM, convert to 8-bit unsigned for DAC
-    // Use a larger read buffer and a leftover byte mechanism to handle odd reads
-    uint8_t read_buf[2048 + 1]; // +1 for possible leftover byte
+    uint8_t read_buf[2048 + 1];
     uint8_t dac_buf[1024];
     int bytes_played = 0;
-    int leftover = 0;          // 0 or 1 leftover byte from previous read
+    int leftover = 0;
 
     while (bytes_played < content_length) {
         int to_read = sizeof(read_buf) - leftover;
@@ -223,16 +217,14 @@ static void playback(void)
         int num_samples = available / 2;
         leftover = available % 2;
 
-        // Convert 16-bit signed PCM to 8-bit unsigned with gain
         int16_t *samples = (int16_t *)read_buf;
         for (int i = 0; i < num_samples; i++) {
-            int32_t amplified = (int32_t)samples[i] * 15; // gain
+            int32_t amplified = (int32_t)samples[i] * DAC_GAIN;
             if (amplified > 32767) amplified = 32767;
             if (amplified < -32768) amplified = -32768;
             dac_buf[i] = (uint8_t)((amplified + 32768) >> 8);
         }
 
-        // Save leftover byte for next iteration
         if (leftover) {
             read_buf[0] = read_buf[num_samples * 2];
         }
@@ -244,21 +236,59 @@ static void playback(void)
     }
 
     ESP_LOGI(TAG, "Playback complete (%d bytes)", bytes_played);
-
-    // Let DMA drain
     vTaskDelay(pdMS_TO_TICKS(500));
 
-cleanup:
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
     dac_continuous_disable(dac_handle);
     dac_continuous_del_channels(dac_handle);
+}
+
+// ---- Poll for responses ----
+static void poll_and_play(void)
+{
+    ESP_LOGI(TAG, "Polling for AI response...");
+
+    for (int attempt = 0; attempt < POLL_MAX_RETRIES; attempt++) {
+        esp_http_client_handle_t client = http_init("/poll", HTTP_METHOD_GET);
+
+        esp_err_t err = esp_http_client_open(client, 0);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "GET /poll failed: %s", esp_err_to_name(err));
+            esp_http_client_cleanup(client);
+            vTaskDelay(pdMS_TO_TICKS(POLL_INTERVAL_MS));
+            continue;
+        }
+
+        int content_length = esp_http_client_fetch_headers(client);
+        int status = esp_http_client_get_status_code(client);
+
+        if (status == 200 && content_length > 0) {
+            play_audio(client, content_length);
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            // Check for more messages
+            attempt = -1;  // reset counter
+            continue;
+        }
+
+        if (status == 204) {
+            ESP_LOGI(TAG, "  No response yet (attempt %d/%d)", attempt + 1, POLL_MAX_RETRIES);
+        } else if (status == 503) {
+            ESP_LOGW(TAG, "  Server error (503), retrying...");
+        } else {
+            ESP_LOGW(TAG, "  Unexpected status %d", status);
+        }
+
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        vTaskDelay(pdMS_TO_TICKS(POLL_INTERVAL_MS));
+    }
+
+    ESP_LOGI(TAG, "Polling complete");
 }
 
 // ---- Main ----
 void app_main(void)
 {
-    // Init NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -267,14 +297,16 @@ void app_main(void)
 
     wifi_init();
 
-    ESP_LOGI(TAG, "Starting in 3 seconds...");
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    while (1) {
+        ESP_LOGI(TAG, "Starting in 3 seconds...");
+        vTaskDelay(pdMS_TO_TICKS(3000));
 
-    mic_init();
-    record_and_upload();
-    mic_deinit();
+        mic_init();
+        record_and_upload();
+        mic_deinit();
 
-    playback();
+        poll_and_play();
 
-    ESP_LOGI(TAG, "Done.");
+        ESP_LOGI(TAG, "Cycle complete. Restarting...");
+    }
 }

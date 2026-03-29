@@ -1,6 +1,16 @@
-# Talker — ESP32 Intercom Echo System
+# Talker — ESP32 Voice AI Intercom
 
-An ESP32-based intercom that records audio via an INMP441 I2S microphone, streams it to a server over WiFi, then plays it back through the onboard DAC.
+An ESP32-based voice intercom that records speech, sends it to an AI-powered server for processing (Whisper STT + Claude LLM), and plays back spoken responses via TTS.
+
+## How It Works
+
+1. ESP32 boots, connects to WiFi, waits 3 seconds
+2. Records audio via I2S INMP441 mic (10 seconds)
+3. Streams chunks to server via HTTP POST (`/upload`)
+4. Server transcribes with Whisper, sends to Claude with a "say" tool
+5. Claude's `say()` calls are queued as responses
+6. ESP32 polls `/poll` — server converts text to speech (OpenAI TTS) and returns audio
+7. ESP32 plays audio through DAC, then loops back to step 2
 
 ## Hardware
 
@@ -12,7 +22,7 @@ An ESP32-based intercom that records audio via an INMP441 I2S microphone, stream
 
 ```
 client/   — ESP-IDF C firmware for ESP32
-server/   — Python echo server (runs on host machine)
+server/   — FastAPI voice AI server (Python)
 ```
 
 ## Quick Start
@@ -20,41 +30,44 @@ server/   — Python echo server (runs on host machine)
 ### Server
 
 ```bash
-just server
+just install   # install Python dependencies
+just server    # run locally on port 8080
 ```
 
-Or manually: `python server/server.py` (listens on port 8080).
+Requires `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` environment variables.
+
+A test client (`name=test`, `api_key=testkey`) is auto-created in local dev mode.
 
 ### Client (ESP32)
 
 Requires [ESP-IDF](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/get-started/) v5.x.
 
+1. Edit `client/main/secrets.h` with your WiFi credentials, server URL, and client API key
+2. Build and flash:
+
 ```bash
-just build     # compile
-just flash     # flash to ESP32
-just monitor   # serial output
+just build
 just fm        # flash + monitor
 ```
 
-Or manually:
+### Deploy to Cloud Run
+
 ```bash
-cd client
-idf.py set-target esp32
-idf.py build
-idf.py -p /dev/tty.usbserial-XXXX flash monitor
+just deploy
 ```
+
+Secrets should be configured in GCP Secret Manager:
+- `anthropic-key` — Anthropic API key
+- `openai-key` — OpenAI API key
 
 ### Configuration
 
-Edit `client/main/main.c` defines:
+Edit `client/main/secrets.h`:
 - `WIFI_SSID` / `WIFI_PASS` — WiFi credentials
-- `SERVER_IP` / `SERVER_PORT` — server address
-- `RECORD_SECONDS` — recording duration
+- `SERVER_URL` — server address (`http://...` for local, `https://...` for Cloud Run)
+- `CLIENT_NAME` / `CLIENT_API_KEY` — client identity
 
-## How It Works
-
-1. ESP32 boots, connects to WiFi, waits 3 seconds
-2. Records audio via I2S mic, streams chunks to server via HTTP POST
-3. Requests playback via HTTP GET
-4. Server sends raw 16-bit 16kHz PCM back
-5. ESP32 converts to 8-bit, plays through DAC with DMA
+Edit `client/main/main.c` defines:
+- `RECORD_SECONDS` — recording duration (default: 10)
+- `DAC_GAIN` — amplification for 8-bit DAC output (default: 15)
+- `POLL_MAX_RETRIES` — how long to wait for AI response (default: 30s)
