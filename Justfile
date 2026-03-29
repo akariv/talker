@@ -19,6 +19,11 @@ tf-plan:
 tf-apply:
     cd infra && terraform apply
 
+# Provision a client: fetch config from Firestore, write secrets.h, build and flash
+provision CLIENT_ID:
+    python scripts/provision.py {{CLIENT_ID}}
+    cd client && idf.py build flash monitor
+
 # Build ESP-IDF client firmware
 build:
     cd client && idf.py build
