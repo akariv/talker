@@ -95,18 +95,17 @@ def enqueue_response(client_name: str, text: str, sequence: int):
 def poll_next_response(client_name: str) -> dict | None:
     """Get the next pending response, mark it as delivering. Returns None if empty."""
     if USE_FIRESTORE:
-        query = (
+        docs = (
             _firestore_db.collection("response_queue")
             .document(client_name)
             .collection("pending")
             .where("status", "==", "pending")
-            .order_by("sequence")
-            .limit(1)
             .get()
         )
-        if not query:
+        if not docs:
             return None
-        doc = query[0]
+        # Sort by sequence in Python to avoid needing a composite index
+        doc = min(docs, key=lambda d: d.to_dict().get("sequence", 0))
         doc.reference.update({"status": "delivering"})
         return {**doc.to_dict(), "_ref": doc.reference}
 
