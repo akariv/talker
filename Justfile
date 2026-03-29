@@ -46,3 +46,7 @@ clean:
 # Install server dependencies
 install:
     pip install -r server/requirements.txt
+
+# Generate test audio and run live integration tests
+test-live:
+    cd tests/live && python generate_audio.py && python test_scenarios.py
