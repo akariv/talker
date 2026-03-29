@@ -4,9 +4,20 @@
 server:
     cd server && uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 
-# Deploy to Cloud Run
+# Deploy is handled by GitHub Actions on push to main
+# For manual deploy, use workflow_dispatch or:
 deploy:
-    gcloud run deploy talker-server --source server/ --region us-central1 --min-instances 1
+    gcloud run deploy talker-server --source server/ --region us-central1
+
+# Terraform
+tf-init:
+    cd infra && terraform init
+
+tf-plan:
+    cd infra && terraform plan
+
+tf-apply:
+    cd infra && terraform apply
 
 # Build ESP-IDF client firmware
 build:

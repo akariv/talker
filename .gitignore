@@ -23,6 +23,11 @@ __pycache__/
 debug_recording.wav
 firebase-debug.log
 
+# Terraform
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.backup
+
 # IDE / tools
 .python-version
 pymakr.conf

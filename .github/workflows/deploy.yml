@@ -1,0 +1,46 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+    paths: [server/**]
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: talker
+  REGION: us-central1
+  SERVICE: talker-server
+  IMAGE: us-central1-docker.pkg.dev/talker/talker/server
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.GH_SA_EMAIL }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push
+        run: |
+          docker build -t $IMAGE:$GITHUB_SHA -t $IMAGE:latest server/
+          docker push $IMAGE:$GITHUB_SHA
+          docker push $IMAGE:latest
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run services update $SERVICE \
+            --region $REGION \
+            --image $IMAGE:$GITHUB_SHA
