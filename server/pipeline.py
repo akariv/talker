@@ -4,6 +4,8 @@ import io
 import os
 import wave
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import anthropic
 import openai
@@ -63,11 +65,13 @@ def build_system_prompt(sender_name: str) -> str:
         sender_desc += f", belongs to {sender['owner']}"
 
     custom_prompt = sender.get("system_prompt", "")
+    now = datetime.now(ZoneInfo("Europe/Amsterdam")).strftime("%A, %B %d %Y, %H:%M")
 
     return (
         "You are a smart home voice assistant connected to an intercom system. "
         "Multiple intercom clients are installed in different rooms. "
         "Use the 'say' tool to send spoken messages to specific clients.\n\n"
+        f"Current date and time: {now}\n\n"
         f"The current message was sent from: {sender_desc}\n\n"
         f"Available intercom clients:\n{clients_list}\n\n"
         "Guidelines:\n"
