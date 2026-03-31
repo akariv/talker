@@ -19,7 +19,9 @@ SAY_TOOL = {
     "description": (
         "Send a spoken message to a specific intercom client. "
         "You can send messages to the client that sent the original message, "
-        "or to any other client in the system."
+        "or to any other client in the system. "
+        "Always reply in English, even if the input message is in another language. "
+        "Address the client by its name when appropriate, but avoid unnecessary repetition of the client name. "
     ),
     "input_schema": {
         "type": "object",

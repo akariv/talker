@@ -35,9 +35,10 @@ static const char *TAG = "intercom";
 #define SPK_WS_PIN   14
 #define SPK_SD_PIN   26
 
-// Button and LED
-#define BUTTON_PIN   GPIO_NUM_4
-#define LED_PIN      GPIO_NUM_2
+// Button and LEDs
+#define BUTTON_PIN    GPIO_NUM_4
+#define LED_ORANGE    GPIO_NUM_5
+#define LED_GREEN     GPIO_NUM_18
 
 // ---- WiFi ----
 static EventGroupHandle_t s_wifi_event_group;
@@ -98,6 +99,8 @@ static bool wifi_connected(void)
 // ---- Embedded root CA for Cloud Run (GTS Root R1) ----
 extern const uint8_t server_root_ca_pem_start[] asm("_binary_server_root_ca_pem_start");
 extern const uint8_t server_root_ca_pem_end[]   asm("_binary_server_root_ca_pem_end");
+extern const uint8_t startup_pcm_start[]        asm("_binary_startup_pcm_start");
+extern const uint8_t startup_pcm_end[]          asm("_binary_startup_pcm_end");
 
 // ---- Single persistent HTTP client ----
 // One client with keep-alive for all requests. TLS session is cached
@@ -216,7 +219,62 @@ static void spk_init(void)
     ESP_LOGI(TAG, "Speaker initialized (I2S TX, 16-bit mono, %d Hz)", SPK_SAMPLE_RATE);
 }
 
-// ---- Button + LED ----
+// ---- Button + LEDs ----
+typedef enum {
+    LED_STATE_OFF,          // idle — both off
+    LED_STATE_INIT,         // init/connecting — orange solid
+    LED_STATE_ERROR,        // error — orange blink
+    LED_STATE_BUTTON,       // button pressed, HTTP setup — orange solid
+    LED_STATE_RECORDING,    // recording — green solid
+    LED_STATE_UPLOADING,    // uploading after release — orange + green solid
+    LED_STATE_WAITING,      // waiting for AI — green blink
+    LED_STATE_PLAYING,      // playing response — green solid
+} led_state_t;
+
+static volatile led_state_t led_state = LED_STATE_OFF;
+
+static void led_task(void *arg)
+{
+    bool blink_on = false;
+    while (1) {
+        blink_on = !blink_on;
+
+        switch (led_state) {
+        case LED_STATE_OFF:
+            gpio_set_level(LED_ORANGE, 0);
+            gpio_set_level(LED_GREEN, 0);
+            break;
+        case LED_STATE_INIT:
+        case LED_STATE_BUTTON:
+            gpio_set_level(LED_ORANGE, 1);
+            gpio_set_level(LED_GREEN, 0);
+            break;
+        case LED_STATE_ERROR:
+            gpio_set_level(LED_ORANGE, blink_on);
+            gpio_set_level(LED_GREEN, 0);
+            break;
+        case LED_STATE_RECORDING:
+            gpio_set_level(LED_ORANGE, 0);
+            gpio_set_level(LED_GREEN, 1);
+            break;
+        case LED_STATE_UPLOADING:
+            gpio_set_level(LED_ORANGE, 1);
+            gpio_set_level(LED_GREEN, 1);
+            break;
+        case LED_STATE_WAITING:
+            gpio_set_level(LED_ORANGE, 0);
+            gpio_set_level(LED_GREEN, blink_on);
+            break;
+        case LED_STATE_PLAYING:
+            gpio_set_level(LED_ORANGE, 0);
+            gpio_set_level(LED_GREEN, blink_on);
+            break;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(250));  // blink rate: 2Hz
+    }
+}
+
 static void gpio_init(void)
 {
     gpio_config_t btn_cfg = {
@@ -229,14 +287,18 @@ static void gpio_init(void)
     ESP_ERROR_CHECK(gpio_config(&btn_cfg));
 
     gpio_config_t led_cfg = {
-        .pin_bit_mask = (1ULL << LED_PIN),
+        .pin_bit_mask = (1ULL << LED_ORANGE) | (1ULL << LED_GREEN),
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
     ESP_ERROR_CHECK(gpio_config(&led_cfg));
-    gpio_set_level(LED_PIN, 0);
+    gpio_set_level(LED_ORANGE, 0);
+    gpio_set_level(LED_GREEN, 0);
+
+    // Start LED blink task
+    xTaskCreate(led_task, "led", 2048, NULL, 1, NULL);
 }
 
 static bool button_pressed(void)
@@ -303,7 +365,6 @@ static void record_and_upload(void)
         }
     }
 
-    gpio_set_level(LED_PIN, 1);
     main_task_handle = xTaskGetCurrentTaskHandle();
     rec_fill_idx = 0;
     rec_fill_offset = 0;
@@ -314,6 +375,7 @@ static void record_and_upload(void)
 
     // Start recording immediately via DMA callback
     rec_active = true;
+    led_state = LED_STATE_RECORDING;
     ESP_LOGI(TAG, "Recording — speak now!");
 
     // While first buffer fills (~2s), set up the HTTP connection
@@ -328,7 +390,7 @@ static void record_and_upload(void)
         ESP_LOGE(TAG, "Failed to open voice connection: %s", esp_err_to_name(err));
         reset_http_client();
         rec_active = false;
-        gpio_set_level(LED_PIN, 0);
+        led_state = LED_STATE_ERROR;
         return;
     }
     http_open = true;
@@ -366,7 +428,7 @@ static void record_and_upload(void)
     int remaining = rec_fill_offset;
     int remaining_idx = rec_fill_idx;
 
-    gpio_set_level(LED_PIN, 0);
+    led_state = LED_STATE_OFF;
 
     // Upload any remaining partial buffer
     if (remaining > 0 && http_open) {
@@ -399,6 +461,30 @@ static void record_and_upload(void)
     if (upload_ok) {
         poll_loop(POLL_ACTIVE_INTERVAL_MS, POLL_ACTIVE_RETRIES);
     }
+    led_state = LED_STATE_OFF;
+}
+
+// ---- Play embedded PCM from flash ----
+static void play_startup_sound(void)
+{
+    size_t len = startup_pcm_end - startup_pcm_start;
+    ESP_LOGI(TAG, "Playing startup sound (%d bytes)", len);
+
+    size_t bytes_written = 0;
+    size_t offset = 0;
+    while (offset < len) {
+        size_t chunk = len - offset;
+        if (chunk > 4096) chunk = 4096;
+        ESP_ERROR_CHECK(i2s_channel_write(spk_handle,
+            startup_pcm_start + offset, chunk, &bytes_written, portMAX_DELAY));
+        offset += bytes_written;
+    }
+
+    // Flush with silence and stop DMA
+    uint8_t silence[4096] = {0};
+    i2s_channel_write(spk_handle, silence, sizeof(silence), &bytes_written, portMAX_DELAY);
+    i2s_channel_disable(spk_handle);
+    i2s_channel_enable(spk_handle);
 }
 
 // ---- I2S Playback (streams HTTP response directly to I2S TX) ----
@@ -423,6 +509,15 @@ static void play_audio(int content_length)
                                           &bytes_written, portMAX_DELAY));
         bytes_played += n;
     }
+
+    // Flush with silence to avoid clicks
+    memset(buf, 0, sizeof(buf));
+    size_t dummy;
+    i2s_channel_write(spk_handle, buf, sizeof(buf), &dummy, portMAX_DELAY);
+
+    // Disable and re-enable to fully stop DMA clocking
+    i2s_channel_disable(spk_handle);
+    i2s_channel_enable(spk_handle);
 
     ESP_LOGI(TAG, "Playback complete (%d bytes, heap: %lu)",
              bytes_played, esp_get_free_heap_size());
@@ -450,8 +545,10 @@ static int poll_once(void)
     int status = esp_http_client_get_status_code(http_client);
 
     if (status == 200 && content_length > 0) {
+        led_state = LED_STATE_PLAYING;
         play_audio(content_length);
         esp_http_client_close(http_client);
+        led_state = LED_STATE_OFF;
         return 1;
     }
 
@@ -479,9 +576,10 @@ static void poll_loop(int interval_ms, int max_retries)
             empty_count++;
         }
 
-        if (button_pressed()) return;
-
-        vTaskDelay(pdMS_TO_TICKS(interval_ms));
+        for (int i = 0; i < interval_ms / 10; i++) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            if (button_pressed()) return;
+        }
     }
 }
 
@@ -495,10 +593,14 @@ void app_main(void)
     }
 
     gpio_init();
+    led_state = LED_STATE_INIT;
     wifi_init();
     mic_init();
     spk_init();
 
+    led_state = LED_STATE_UPLOADING;  // orange + green during startup sound
+    play_startup_sound();
+    led_state = LED_STATE_OFF;
     ESP_LOGI(TAG, "Client '%s' ready. Press button to record.", CLIENT_NAME);
     ESP_LOGI(TAG, "Free heap: %lu bytes", esp_get_free_heap_size());
 
@@ -514,6 +616,7 @@ void app_main(void)
         if (button_pressed()) {
             vTaskDelay(pdMS_TO_TICKS(50));
             if (button_pressed()) {
+                led_state = LED_STATE_BUTTON;
                 record_and_upload();
                 continue;
             }
@@ -525,6 +628,7 @@ void app_main(void)
             if (button_pressed()) {
                 vTaskDelay(pdMS_TO_TICKS(50));
                 if (button_pressed()) {
+                    led_state = LED_STATE_BUTTON;
                     record_and_upload();
                     break;
                 }
