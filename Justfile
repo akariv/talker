@@ -1,5 +1,10 @@
 # Talker — ESP32 Voice AI Intercom
 
+set shell := ["zsh", "-c"]
+
+# Source ESP-IDF tools before any idf.py command
+idf := "source ~/.espressif/tools/activate_idf_v6.0.sh && python $IDF_PATH/tools/idf.py"
+
 # Run the server locally
 server:
     cd server && uvicorn main:app --host 0.0.0.0 --port 8080 --reload
@@ -22,31 +27,31 @@ tf-apply:
 # Provision a client: fetch config from Firestore, write secrets.h, build and flash
 provision CLIENT_ID:
     python scripts/provision.py {{CLIENT_ID}}
-    cd client && idf.py build flash monitor
+    cd client && {{idf}} build flash monitor
 
 # Build ESP-IDF client firmware
 build:
-    cd client && idf.py build
+    cd client && {{idf}} build
 
 # Flash firmware to ESP32
 flash:
-    cd client && idf.py flash
+    cd client && {{idf}} flash
 
 # Open serial monitor
 monitor:
-    cd client && idf.py monitor
+    cd client && {{idf}} monitor
 
 # Flash + monitor
 fm:
-    cd client && idf.py flash monitor
+    cd client && {{idf}} flash monitor
 
 # Set ESP32 target (run once)
 setup:
-    cd client && idf.py set-target esp32
+    cd client && {{idf}} set-target esp32
 
 # Clean build artifacts
 clean:
-    cd client && idf.py fullclean
+    cd client && {{idf}} fullclean
 
 # Install server dependencies
 install:

@@ -14,6 +14,7 @@ sdkconfig.old
 *.raw
 *.wav
 *.bin
+*.mp3
 
 # Python
 .venv/
@@ -32,3 +33,4 @@ infra/*.tfstate.backup
 # IDE / tools
 .python-version
 pymakr.conf
+.cache/
