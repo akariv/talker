@@ -28,7 +28,8 @@ firebase-debug.log
 # Terraform
 infra/.terraform/
 infra/*.tfstate
-infra/*.tfstate.backup
+infra/*.tfstate*
+infra/*.backup
 
 # IDE / tools
 .python-version
