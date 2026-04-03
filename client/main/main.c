@@ -31,9 +31,9 @@ static const char *TAG = "intercom";
 #define MIC_SD_PIN   32
 
 // I2S speaker pins (port 1, TX) — MAX98357A
-#define SPK_SCK_PIN  27
-#define SPK_WS_PIN   14
-#define SPK_SD_PIN   26
+#define SPK_SCK_PIN  27  // BCLK
+#define SPK_WS_PIN   26  // LRC
+#define SPK_SD_PIN   14  // DIN
 
 // Button and LEDs
 #define BUTTON_PIN    GPIO_NUM_4

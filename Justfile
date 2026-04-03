@@ -60,3 +60,10 @@ install:
 # Generate test audio and run live integration tests
 test-live:
     cd tests/live && python generate_audio.py && python test_scenarios.py
+
+# Flash board test program (swaps main.c temporarily)
+board-test:
+    cp client/main/main.c client/main/main.c.bak
+    cp client/test/main.c client/main/main.c
+    -cd client && {{idf}} build flash monitor
+    mv client/main/main.c.bak client/main/main.c
