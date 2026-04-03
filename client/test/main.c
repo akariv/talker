@@ -143,15 +143,20 @@ static void test_speaker(void)
     ESP_LOGI(TAG, "  Speaker: PASS (verify you heard a tone)");
 }
 
-static void test_microphone(void)
+static void test_mic_and_playback(void)
 {
-    ESP_LOGI(TAG, "=== TEST: Microphone (1 second recording) ===");
+    ESP_LOGI(TAG, "=== TEST: Record 3s + Playback ===");
+    ESP_LOGI(TAG, "  Speak now...");
 
+    // Green LED on during recording
+    gpio_set_level(LED_GREEN, 1);
+
+    // Init mic
     i2s_chan_handle_t mic_handle;
-    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-    ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, NULL, &mic_handle));
+    i2s_chan_config_t mic_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    ESP_ERROR_CHECK(i2s_new_channel(&mic_chan_cfg, NULL, &mic_handle));
 
-    i2s_std_config_t std_cfg = {
+    i2s_std_config_t mic_std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
             I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
@@ -164,19 +169,21 @@ static void test_microphone(void)
             .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
         },
     };
-    ESP_ERROR_CHECK(i2s_channel_init_std_mode(mic_handle, &std_cfg));
+    ESP_ERROR_CHECK(i2s_channel_init_std_mode(mic_handle, &mic_std_cfg));
     ESP_ERROR_CHECK(i2s_channel_enable(mic_handle));
 
-    // Discard first read (stale data)
+    // Discard stale data
     uint8_t discard[4096];
     size_t bytes_read;
     i2s_channel_read(mic_handle, discard, sizeof(discard), &bytes_read, pdMS_TO_TICKS(100));
 
-    // Record 1 second
-    int total_bytes = SAMPLE_RATE * 2;  // 16-bit mono
+    // Record 3 seconds
+    int rec_seconds = 3;
+    int total_bytes = SAMPLE_RATE * 2 * rec_seconds;
     int16_t *rec_buf = malloc(total_bytes);
     if (rec_buf == NULL) {
         ESP_LOGE(TAG, "  Failed to allocate recording buffer");
+        gpio_set_level(LED_GREEN, 0);
         return;
     }
 
@@ -191,8 +198,9 @@ static void test_microphone(void)
 
     i2s_channel_disable(mic_handle);
     i2s_del_channel(mic_handle);
+    gpio_set_level(LED_GREEN, 0);
 
-    // Analyze: check peak and RMS
+    // Analyze
     int num_samples = total_bytes / 2;
     int32_t peak = 0;
     int64_t sum_sq = 0;
@@ -202,15 +210,60 @@ static void test_microphone(void)
         sum_sq += (int64_t)rec_buf[i] * rec_buf[i];
     }
     int32_t rms = (int32_t)sqrtf((float)sum_sq / num_samples);
-    free(rec_buf);
 
-    ESP_LOGI(TAG, "  Peak: %ld/32767, RMS: %ld", peak, rms);
+    ESP_LOGI(TAG, "  Recorded %d bytes. Peak: %ld/32767, RMS: %ld", total_bytes, peak, rms);
 
-    if (peak > 50) {
-        ESP_LOGI(TAG, "  Microphone: PASS");
-    } else {
+    if (peak < 50) {
         ESP_LOGE(TAG, "  Microphone: FAIL (no signal detected)");
+        free(rec_buf);
+        return;
     }
+    ESP_LOGI(TAG, "  Microphone: PASS");
+
+    // Play it back through speaker
+    ESP_LOGI(TAG, "  Playing back recording...");
+    gpio_set_level(LED_ORANGE, 1);
+
+    i2s_chan_handle_t spk_handle;
+    i2s_chan_config_t spk_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
+    ESP_ERROR_CHECK(i2s_new_channel(&spk_chan_cfg, &spk_handle, NULL));
+
+    i2s_std_config_t spk_std_cfg = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
+            I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED,
+            .bclk = (gpio_num_t)SPK_SCK_PIN,
+            .ws   = (gpio_num_t)SPK_WS_PIN,
+            .din  = I2S_GPIO_UNUSED,
+            .dout = (gpio_num_t)SPK_SD_PIN,
+            .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
+        },
+    };
+    ESP_ERROR_CHECK(i2s_channel_init_std_mode(spk_handle, &spk_std_cfg));
+    ESP_ERROR_CHECK(i2s_channel_enable(spk_handle));
+
+    size_t bytes_written;
+    offset = 0;
+    while (offset < total_bytes) {
+        int chunk = total_bytes - offset;
+        if (chunk > 4096) chunk = 4096;
+        ESP_ERROR_CHECK(i2s_channel_write(spk_handle, (uint8_t *)rec_buf + offset,
+                                          chunk, &bytes_written, portMAX_DELAY));
+        offset += bytes_written;
+    }
+
+    // Silence flush
+    uint8_t silence[4096] = {0};
+    i2s_channel_write(spk_handle, silence, sizeof(silence), &bytes_written, portMAX_DELAY);
+
+    i2s_channel_disable(spk_handle);
+    i2s_del_channel(spk_handle);
+    free(rec_buf);
+    gpio_set_level(LED_ORANGE, 0);
+
+    ESP_LOGI(TAG, "  Playback complete. Verify you heard your voice.");
 }
 
 static void test_wifi(void)
@@ -321,7 +374,7 @@ void app_main(void)
         test_speaker();
         vTaskDelay(pdMS_TO_TICKS(500));
 
-        test_microphone();
+        test_mic_and_playback();
         vTaskDelay(pdMS_TO_TICKS(500));
 
         test_wifi();
