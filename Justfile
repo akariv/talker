@@ -5,53 +5,52 @@ set shell := ["zsh", "-c"]
 # Source ESP-IDF tools before any idf.py command
 idf := "source ~/.espressif/tools/activate_idf_v6.0.sh && python $IDF_PATH/tools/idf.py"
 
+# Which firmware project to operate on. Override with `just PROJECT=<name> <recipe>`
+# or `PROJECT=<name> just <recipe>`.
+PROJECT := env_var_or_default("PROJECT", "talker")
+proj_dir := "firmware/projects/" + PROJECT
+build_dir := justfile_directory() + "/build/" + PROJECT
+
+# ---- Firmware: per-project (defaults to talker) ----
+
+# Set ESP32 target (run once per project)
+setup:
+    cd {{proj_dir}} && {{idf}} -B {{build_dir}} set-target esp32
+
+# Build firmware
+build:
+    cd {{proj_dir}} && {{idf}} -B {{build_dir}} build
+
+# Flash firmware to ESP32
+flash:
+    cd {{proj_dir}} && {{idf}} -B {{build_dir}} flash
+
+# Open serial monitor
+monitor:
+    cd {{proj_dir}} && {{idf}} -B {{build_dir}} monitor
+
+# Flash + monitor
+fm:
+    cd {{proj_dir}} && {{idf}} -B {{build_dir}} flash monitor
+
+# Clean build artifacts for this project
+clean:
+    cd {{proj_dir}} && {{idf}} -B {{build_dir}} fullclean
+
+# Provision a client: fetch config from Firestore, write secrets.h, build and flash
+provision CLIENT_ID:
+    python scripts/provision.py --project {{PROJECT}} {{CLIENT_ID}}
+    cd {{proj_dir}} && {{idf}} -B {{build_dir}} build flash monitor
+
+# ---- Server ----
+
 # Run the server locally
 server:
     cd server && uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 
 # Deploy is handled by GitHub Actions on push to main
-# For manual deploy, use workflow_dispatch or:
 deploy:
     gcloud run deploy talker-server --source server/ --region us-central1
-
-# Terraform
-tf-init:
-    cd infra && terraform init
-
-tf-plan:
-    cd infra && terraform plan
-
-tf-apply:
-    cd infra && terraform apply
-
-# Provision a client: fetch config from Firestore, write secrets.h, build and flash
-provision CLIENT_ID:
-    python scripts/provision.py {{CLIENT_ID}}
-    cd client && {{idf}} build flash monitor
-
-# Build ESP-IDF client firmware
-build:
-    cd client && {{idf}} build
-
-# Flash firmware to ESP32
-flash:
-    cd client && {{idf}} flash
-
-# Open serial monitor
-monitor:
-    cd client && {{idf}} monitor
-
-# Flash + monitor
-fm:
-    cd client && {{idf}} flash monitor
-
-# Set ESP32 target (run once)
-setup:
-    cd client && {{idf}} set-target esp32
-
-# Clean build artifacts
-clean:
-    cd client && {{idf}} fullclean
 
 # Install server dependencies
 install:
@@ -61,9 +60,13 @@ install:
 test-live:
     cd tests/live && python generate_audio.py && python test_scenarios.py
 
-# Flash board test program (swaps main.c temporarily)
-board-test:
-    cp client/main/main.c client/main/main.c.bak
-    cp client/test/main.c client/main/main.c
-    -cd client && {{idf}} build flash monitor
-    mv client/main/main.c.bak client/main/main.c
+# ---- Infra ----
+
+tf-init:
+    cd infra && terraform init
+
+tf-plan:
+    cd infra && terraform plan
+
+tf-apply:
+    cd infra && terraform apply
