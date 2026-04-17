@@ -33,17 +33,27 @@ just PROJECT=board-test fm
 Every firmware recipe in the `Justfile` accepts `PROJECT=<name>` to select
 which project under `projects/` to operate on. Default is `talker`.
 
-## Provisioning a device
+## Providing credentials (`secrets.h`)
 
-`scripts/provision.py` fetches WiFi + server + API-key config from Firestore
-and writes `firmware/projects/<project>/main/secrets.h`:
+Each project's `main/main.c` includes `secrets.h` (gitignored). Two ways to
+create it:
 
+**Option A — provision from Firestore (recommended for talker):**
 ```bash
 just provision kitchen                         # provisions talker (default)
 just PROJECT=board-test provision test-device  # provisions board-test
 ```
+`scripts/provision.py` fetches WiFi + server + API-key config from Firestore
+and writes `firmware/projects/<project>/main/secrets.h`.
 
-`secrets.h` is gitignored.
+**Option B — copy the example template (simplest for board-test or one-off builds):**
+```bash
+cp firmware/projects/board-test/main/secrets.h.example \
+   firmware/projects/board-test/main/secrets.h
+# edit to fill in real WiFi credentials
+```
+Every project ships a `secrets.h.example` checked into git that documents the
+exact macros that project's firmware expects.
 
 ## Adding a new project
 
