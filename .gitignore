@@ -1,5 +1,5 @@
 # Legacy/experimental files
-poc/
+archive/
 
 # Secrets
 secrets.h
@@ -7,8 +7,9 @@ secrets.h
 
 # ESP-IDF build artifacts
 build/
-sdkconfig
-sdkconfig.old
+firmware/**/build/
+firmware/**/sdkconfig
+firmware/**/sdkconfig.old
 
 # Audio files
 *.raw
@@ -35,3 +36,4 @@ infra/*.backup
 .python-version
 pymakr.conf
 .cache/
+.DS_Store

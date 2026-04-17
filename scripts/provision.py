@@ -1,20 +1,23 @@
 """Provision an ESP32 client by fetching config from Firestore and writing secrets.h.
 
-Usage: python scripts/provision.py <client_id>
+Usage: python scripts/provision.py [--project <name>] <client_id>
 
 Reads from Firestore:
   - config/wifi       → WIFI_SSID, WIFI_PASS
   - config/server     → SERVER_URL
   - clients/<id>      → CLIENT_NAME, CLIENT_API_KEY
+
+Writes to: firmware/projects/<project>/main/secrets.h
 """
 
-import os
-import sys
+import argparse
 import json
 import subprocess
+import sys
+from pathlib import Path
 
 PROJECT_ID = "talker-491708"
-SECRETS_PATH = os.path.join(os.path.dirname(__file__), "..", "client", "main", "secrets.h")
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def get_access_token() -> str:
@@ -48,16 +51,22 @@ def firestore_get(token: str, collection: str, doc_id: str) -> dict:
 
 
 def main():
-    if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} <client_id>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--project", default="talker",
+                        help="Firmware project under firmware/projects/ (default: talker)")
+    parser.add_argument("client_id", help="Firestore client doc ID")
+    args = parser.parse_args()
 
-    client_id = sys.argv[1]
-    print(f"Provisioning client: {client_id}")
+    project_dir = REPO_ROOT / "firmware" / "projects" / args.project
+    if not project_dir.is_dir():
+        print(f"error: no such firmware project: {project_dir}", file=sys.stderr)
+        sys.exit(1)
+    secrets_path = project_dir / "main" / "secrets.h"
+
+    print(f"Provisioning client '{args.client_id}' for project '{args.project}'")
 
     token = get_access_token()
 
-    # Fetch config
     print("  Fetching WiFi config...")
     wifi = firestore_get(token, "config", "wifi")
     ssid = wifi["ssid"]
@@ -69,12 +78,11 @@ def main():
     server_url = server["url"]
     print(f"    URL: {server_url}")
 
-    print(f"  Fetching client '{client_id}'...")
-    client = firestore_get(token, "clients", client_id)
+    print(f"  Fetching client '{args.client_id}'...")
+    client = firestore_get(token, "clients", args.client_id)
     api_key = client["api_key"]
     print(f"    API key: {api_key[:8]}...")
 
-    # Write secrets.h
     secrets_content = f'''#pragma once
 
 #define WIFI_SSID       "{ssid}"
@@ -82,15 +90,15 @@ def main():
 
 #define SERVER_URL      "{server_url}"
 
-#define CLIENT_NAME     "{client_id}"
+#define CLIENT_NAME     "{args.client_id}"
 #define CLIENT_API_KEY  "{api_key}"
 '''
 
-    with open(SECRETS_PATH, "w") as f:
-        f.write(secrets_content)
+    secrets_path.parent.mkdir(parents=True, exist_ok=True)
+    secrets_path.write_text(secrets_content)
 
-    print(f"\n  Written to {os.path.abspath(SECRETS_PATH)}")
-    print("  Done! Now run: just build or just fm")
+    print(f"\n  Written to {secrets_path}")
+    print(f"  Done! Now run: just PROJECT={args.project} build  (or: just fm)")
 
 
 if __name__ == "__main__":
