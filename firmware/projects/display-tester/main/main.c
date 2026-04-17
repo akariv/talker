@@ -206,48 +206,55 @@ static void fill(uint8_t *plane, uint8_t byte)
     memset(plane, byte, PLANE_BYTES);
 }
 
-static void fill_stripes(uint8_t *plane)
-{
-    for (int i = 0; i < PLANE_BYTES; i++) {
-        plane[i] = (i & 1) ? 0x55 : 0xAA;
-    }
-}
-
-static void set_pixel(uint8_t *plane, int x, int y, bool set)
+// Bit conventions for this SSD1680 panel (empirically verified):
+//   black plane: 1 = white,  0 = black
+//   red plane:   1 = red,    0 = transparent (show black plane)
+// Red wins over black on any pixel where both are set.
+static void set_bit(uint8_t *plane, int x, int y, bool bit)
 {
     if (x < 0 || x >= PANEL_W || y < 0 || y >= PANEL_H) return;
     int idx = y * ROW_BYTES + (x >> 3);
     uint8_t mask = 0x80 >> (x & 7);
-    // Planes are "set = 1 means color off" for black (1 = white paper).
-    // We invert here so callers can pass `true` to mean "draw the mark".
-    if (set) plane[idx] &= ~mask;
-    else     plane[idx] |= mask;
+    if (bit) plane[idx] |= mask;
+    else     plane[idx] &= ~mask;
+}
+
+static void fill_checkerboard(uint8_t *plane)
+{
+    const int sq = 16; // 16×16-pixel squares → 8 across, ~18 tall
+    for (int y = 0; y < PANEL_H; y++) {
+        int row_parity = (y / sq) & 1;
+        for (int xb = 0; xb < ROW_BYTES; xb++) {
+            int col_parity = ((xb * 8) / sq) & 1;
+            plane[y * ROW_BYTES + xb] = (row_parity ^ col_parity) ? 0x00 : 0xFF;
+        }
+    }
 }
 
 static void build_stage5(uint8_t *black, uint8_t *red)
 {
-    // Start from white on both planes.
-    fill(black, 0xFF);
-    fill(red, 0xFF);
+    fill(black, 0xFF); // white background
+    fill(red, 0x00);   // no red background
 
-    // Black: 2-pixel border rectangle.
-    for (int t = 0; t < 2; t++) {
+    // Black border: 8px thick so it's visible at the edges.
+    const int bw = 8;
+    for (int t = 0; t < bw; t++) {
         for (int x = 0; x < PANEL_W; x++) {
-            set_pixel(black, x, t, true);
-            set_pixel(black, x, PANEL_H - 1 - t, true);
+            set_bit(black, x, t, 0);
+            set_bit(black, x, PANEL_H - 1 - t, 0);
         }
         for (int y = 0; y < PANEL_H; y++) {
-            set_pixel(black, t, y, true);
-            set_pixel(black, PANEL_W - 1 - t, y, true);
+            set_bit(black, t, y, 0);
+            set_bit(black, PANEL_W - 1 - t, y, 0);
         }
     }
 
-    // Red: 32×32 filled block near center.
+    // Red 32×32 block near center.
     const int bx = (PANEL_W - 32) / 2;
     const int by = (PANEL_H - 32) / 2;
     for (int y = by; y < by + 32; y++) {
         for (int x = bx; x < bx + 32; x++) {
-            set_pixel(red, x, y, true);
+            set_bit(red, x, y, 1);
         }
     }
 }
@@ -289,17 +296,17 @@ void app_main(void)
         ESP_LOGI(TAG, "---- new loop: initializing display ----");
         display_init();
 
-        fill(black_plane, 0xFF); fill(red_plane, 0xFF);
+        fill(black_plane, 0xFF); fill(red_plane, 0x00);
         run_stage(1, "blank white", black_plane, red_plane);
 
-        fill(black_plane, 0x00); fill(red_plane, 0xFF);
+        fill(black_plane, 0x00); fill(red_plane, 0x00);
         run_stage(2, "full black", black_plane, red_plane);
 
-        fill(black_plane, 0xFF); fill(red_plane, 0x00);
+        fill(black_plane, 0x00); fill(red_plane, 0xFF);
         run_stage(3, "full red", black_plane, red_plane);
 
-        fill_stripes(black_plane); fill(red_plane, 0xFF);
-        run_stage(4, "stripes (AA/55)", black_plane, red_plane);
+        fill_checkerboard(black_plane); fill(red_plane, 0x00);
+        run_stage(4, "16x16 checkerboard", black_plane, red_plane);
 
         build_stage5(black_plane, red_plane);
         run_stage(5, "border + red block", black_plane, red_plane);
