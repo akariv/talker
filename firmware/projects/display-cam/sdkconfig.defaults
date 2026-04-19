@@ -1,0 +1,13 @@
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_ESP_WIFI_AUTH_WPA2_PSK=y
+# Custom partition: 2 MB app slot (same layout as talker), since the
+# firmware runs esp32-camera + WiFi + mbedTLS and won't fit in the 1 MB
+# default single_app partition.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+# HTTPS support (for Cloud Run) — embed our own root CA, drop the
+# full bundle to save ~160 KB RAM.
+CONFIG_ESP_TLS_USING_MBEDTLS=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=n
