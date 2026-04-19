@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        project: [talker, board-test, display-tester]
+        project: [talker, board-test, display-tester, display-cam]
     container:
       image: espressif/idf:release-v6.0
     steps:

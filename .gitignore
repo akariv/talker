@@ -26,6 +26,7 @@ __pycache__/
 # Debug
 debug_recording.wav
 firebase-debug.log
+out.png
 
 # Terraform
 infra/.terraform/
