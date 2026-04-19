@@ -1,0 +1,44 @@
+name: Build firmware
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/firmware-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.project }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [talker, board-test, display-tester]
+    container:
+      image: espressif/idf:release-v6.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trust workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Stub secrets.h if the project expects it
+        shell: bash
+        run: |
+          example="firmware/projects/${{ matrix.project }}/main/secrets.h.example"
+          target="firmware/projects/${{ matrix.project }}/main/secrets.h"
+          if [ -f "$example" ] && [ ! -f "$target" ]; then
+            cp "$example" "$target"
+          fi
+
+      - name: Build
+        shell: bash
+        working-directory: firmware/projects/${{ matrix.project }}
+        run: |
+          . "$IDF_PATH/export.sh"
+          build_dir="$GITHUB_WORKSPACE/build/${{ matrix.project }}"
+          idf.py -B "$build_dir" set-target esp32
+          idf.py -B "$build_dir" build
