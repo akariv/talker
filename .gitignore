@@ -10,6 +10,7 @@ build/
 firmware/**/build/
 firmware/**/sdkconfig
 firmware/**/sdkconfig.old
+firmware/**/managed_components/
 
 # Audio files
 *.raw
