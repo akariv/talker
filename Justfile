@@ -37,6 +37,13 @@ fm:
 clean:
     cd {{proj_dir}} && {{idf}} -B {{build_dir}} fullclean
 
+# Kick the CP210x DEXT when /dev/cu.* stops appearing (macOS).
+# Restarts driverkitd; if the device still doesn't show, re-run and it
+# will also re-enumerate USB.
+serial-reset:
+    sudo pkill -9 driverkitd || true
+    @echo "driverkitd restarted. Wait 2–3s, then check ls /dev/cu.*"
+
 # Provision a client: fetch config from Firestore, write secrets.h, build and flash
 provision CLIENT_ID:
     python scripts/provision.py --project {{PROJECT}} {{CLIENT_ID}}
