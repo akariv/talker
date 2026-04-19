@@ -53,9 +53,11 @@ static const char *TAG = "display_tester";
 #define CAM_PIN_D7     36
 #define CAM_PIN_RESET  15
 #define CAM_PIN_PWDN   -1        // tied to GND externally
-#define CAM_XCLK_HZ    (20 * 1000 * 1000)
-#define CAM_W          160
-#define CAM_H          120
+#define CAM_XCLK_HZ    (8 * 1000 * 1000)  // OV7670 needs slow XCLK for ESP32 I2S DMA to keep up
+// QVGA is the best-tested OV7670 frame size in esp32-camera; QQVGA/QCIF
+// paths are flaky on this sensor.
+#define CAM_W          320
+#define CAM_H          240
 
 static spi_device_handle_t s_spi;
 
@@ -307,11 +309,11 @@ static esp_err_t camera_init(void)
         .xclk_freq_hz   = CAM_XCLK_HZ,
         .ledc_timer     = LEDC_TIMER_0,
         .ledc_channel   = LEDC_CHANNEL_0,
-        .pixel_format   = PIXFORMAT_GRAYSCALE,
-        .frame_size     = FRAMESIZE_QQVGA, // 160x120
+        .pixel_format   = PIXFORMAT_GRAYSCALE, // 1 byte/pixel → 76 KB fits WROOM-32 DRAM
+        .frame_size     = FRAMESIZE_QVGA,      // 320x240 (OV7670 native, no DCW truncation)
         .fb_count       = 1,
         .fb_location    = CAMERA_FB_IN_DRAM,
-        .grab_mode      = CAMERA_GRAB_LATEST,
+        .grab_mode      = CAMERA_GRAB_WHEN_EMPTY, // wait for a full frame, don't race
     };
     return esp_camera_init(&cfg);
 }
@@ -324,8 +326,8 @@ static void render_camera_frame(const uint8_t *gray,
     fill(black, 0xFF); // white bg
     fill(red,   0x00);
 
-    const int dst_w = 128;                // full panel width
-    const int dst_h = (CAM_H * dst_w) / CAM_W; // 96 (preserve 4:3)
+    const int dst_w = 128;                     // full panel width
+    const int dst_h = (CAM_H * dst_w) / CAM_W; // 96 for 320x240
     const int dst_x0 = (PANEL_W - dst_w) / 2;  // 0
     const int dst_y0 = (PANEL_H - dst_h) / 2;  // 100
 
