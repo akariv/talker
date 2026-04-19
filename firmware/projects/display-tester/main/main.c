@@ -15,6 +15,7 @@
 #include "driver/spi_master.h"
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_camera.h"
 
 static const char *TAG = "display_tester";
 
@@ -34,6 +35,27 @@ static const char *TAG = "display_tester";
 
 #define SPI_HOST      SPI3_HOST
 #define SPI_CLOCK_HZ  (4 * 1000 * 1000)
+
+// ---- OV7670 camera (per camera-display-plan.md) ----
+#define CAM_PIN_SIOD   21
+#define CAM_PIN_SIOC   22
+#define CAM_PIN_XCLK   27
+#define CAM_PIN_PCLK   25
+#define CAM_PIN_VSYNC  26
+#define CAM_PIN_HREF   19
+#define CAM_PIN_D0     34
+#define CAM_PIN_D1     35
+#define CAM_PIN_D2     32
+#define CAM_PIN_D3     33
+#define CAM_PIN_D4     13
+#define CAM_PIN_D5     14
+#define CAM_PIN_D6     39
+#define CAM_PIN_D7     36
+#define CAM_PIN_RESET  15
+#define CAM_PIN_PWDN   -1        // tied to GND externally
+#define CAM_XCLK_HZ    (20 * 1000 * 1000)
+#define CAM_W          160
+#define CAM_H          120
 
 static spi_device_handle_t s_spi;
 
@@ -260,6 +282,99 @@ static void build_stage5(uint8_t *black, uint8_t *red)
 }
 
 // ------------------------------------------------------------------
+// Camera phase: grab 5 frames from OV7670, threshold and center on panel
+// ------------------------------------------------------------------
+
+static esp_err_t camera_init(void)
+{
+    camera_config_t cfg = {
+        .pin_pwdn       = CAM_PIN_PWDN,
+        .pin_reset      = CAM_PIN_RESET,
+        .pin_xclk       = CAM_PIN_XCLK,
+        .pin_sccb_sda   = CAM_PIN_SIOD,
+        .pin_sccb_scl   = CAM_PIN_SIOC,
+        .pin_d7         = CAM_PIN_D7,
+        .pin_d6         = CAM_PIN_D6,
+        .pin_d5         = CAM_PIN_D5,
+        .pin_d4         = CAM_PIN_D4,
+        .pin_d3         = CAM_PIN_D3,
+        .pin_d2         = CAM_PIN_D2,
+        .pin_d1         = CAM_PIN_D1,
+        .pin_d0         = CAM_PIN_D0,
+        .pin_vsync      = CAM_PIN_VSYNC,
+        .pin_href       = CAM_PIN_HREF,
+        .pin_pclk       = CAM_PIN_PCLK,
+        .xclk_freq_hz   = CAM_XCLK_HZ,
+        .ledc_timer     = LEDC_TIMER_0,
+        .ledc_channel   = LEDC_CHANNEL_0,
+        .pixel_format   = PIXFORMAT_GRAYSCALE,
+        .frame_size     = FRAMESIZE_QQVGA, // 160x120
+        .fb_count       = 1,
+        .fb_location    = CAMERA_FB_IN_DRAM,
+        .grab_mode      = CAMERA_GRAB_LATEST,
+    };
+    return esp_camera_init(&cfg);
+}
+
+// Nearest-neighbor scale CAM_W×CAM_H → dst_w×dst_h, threshold to 1bpp,
+// draw centered on the panel into the black plane. Red plane left blank.
+static void render_camera_frame(const uint8_t *gray,
+                                uint8_t *black, uint8_t *red)
+{
+    fill(black, 0xFF); // white bg
+    fill(red,   0x00);
+
+    const int dst_w = 128;                // full panel width
+    const int dst_h = (CAM_H * dst_w) / CAM_W; // 96 (preserve 4:3)
+    const int dst_x0 = (PANEL_W - dst_w) / 2;  // 0
+    const int dst_y0 = (PANEL_H - dst_h) / 2;  // 100
+
+    for (int dy = 0; dy < dst_h; dy++) {
+        int sy = (dy * CAM_H) / dst_h;
+        const uint8_t *row = gray + sy * CAM_W;
+        for (int dx = 0; dx < dst_w; dx++) {
+            int sx = (dx * CAM_W) / dst_w;
+            // black plane: 1 = white, 0 = black; threshold at mid-gray.
+            set_bit(black, dst_x0 + dx, dst_y0 + dy, row[sx] >= 128);
+        }
+    }
+}
+
+static void run_camera_phase(uint8_t *black, uint8_t *red)
+{
+    ESP_LOGI(TAG, "=== PHASE 0: CAMERA (5 frames) ===");
+
+    if (camera_init() != ESP_OK) {
+        ESP_LOGE(TAG, "camera init failed — skipping camera phase");
+        return;
+    }
+
+    // Toss one frame so AGC/AWB can settle before the first capture.
+    camera_fb_t *warmup = esp_camera_fb_get();
+    if (warmup) esp_camera_fb_return(warmup);
+
+    for (int i = 1; i <= 5; i++) {
+        ESP_LOGI(TAG, "  frame %d/5: capturing...", i);
+        camera_fb_t *fb = esp_camera_fb_get();
+        if (!fb) {
+            ESP_LOGW(TAG, "  frame %d: fb_get returned NULL", i);
+            continue;
+        }
+        ESP_LOGI(TAG, "  frame %d: %dx%d, %u bytes", i,
+                 fb->width, fb->height, (unsigned)fb->len);
+
+        render_camera_frame(fb->buf, black, red);
+        esp_camera_fb_return(fb);
+
+        display_write_planes(black, red);
+        display_refresh();
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+
+    esp_camera_deinit();
+}
+
+// ------------------------------------------------------------------
 // Test stages
 // ------------------------------------------------------------------
 
@@ -295,6 +410,8 @@ void app_main(void)
     while (1) {
         ESP_LOGI(TAG, "---- new loop: initializing display ----");
         display_init();
+
+        run_camera_phase(black_plane, red_plane);
 
         fill(black_plane, 0xFF); fill(red_plane, 0x00);
         run_stage(1, "blank white", black_plane, red_plane);
