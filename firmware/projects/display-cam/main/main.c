@@ -54,32 +54,32 @@ static const char *TAG = "display_cam";
 #define LOGICAL_H     PANEL_W  // 128
 
 // ---- Display pins ----
-#define PIN_CLK       GPIO_NUM_18
-#define PIN_MOSI      GPIO_NUM_23
-#define PIN_CS        GPIO_NUM_5
+#define PIN_CLK       GPIO_NUM_23
+#define PIN_MOSI      GPIO_NUM_18
+#define PIN_CS        GPIO_NUM_16
 #define PIN_DC        GPIO_NUM_17
-#define PIN_RES       GPIO_NUM_16
+#define PIN_RES       GPIO_NUM_5
 #define PIN_BUSY      GPIO_NUM_4
 
 #define SPI_HOST      SPI3_HOST
 #define SPI_CLOCK_HZ  (4 * 1000 * 1000)
 
 // ---- OV7670 camera pins ----
-#define CAM_PIN_SIOD   21
-#define CAM_PIN_SIOC   22
-#define CAM_PIN_XCLK   27
-#define CAM_PIN_PCLK   25
+#define CAM_PIN_SIOD   33
+#define CAM_PIN_SIOC   25
+#define CAM_PIN_XCLK   15
+#define CAM_PIN_PCLK   19
 #define CAM_PIN_VSYNC  26
-#define CAM_PIN_HREF   19
-#define CAM_PIN_D0     34
-#define CAM_PIN_D1     35
-#define CAM_PIN_D2     32
-#define CAM_PIN_D3     33
-#define CAM_PIN_D4     13
+#define CAM_PIN_HREF   32
+#define CAM_PIN_D0     35
+#define CAM_PIN_D1     22
+#define CAM_PIN_D2     34
+#define CAM_PIN_D3     13
+#define CAM_PIN_D4     39
 #define CAM_PIN_D5     14
-#define CAM_PIN_D6     39
-#define CAM_PIN_D7     36
-#define CAM_PIN_RESET  15
+#define CAM_PIN_D6     36
+#define CAM_PIN_D7     27
+#define CAM_PIN_RESET  21
 #define CAM_PIN_PWDN   -1
 #define CAM_XCLK_HZ    (8 * 1000 * 1000)
 #define CAM_W          320
@@ -536,16 +536,9 @@ void app_main(void)
         ESP_LOGE(TAG, "plane buffer alloc failed");
         return;
     }
-    memset(s_black_plane, 0xFF, PLANE_BYTES); // white
-    memset(s_red_plane,   0x00, PLANE_BYTES); // no red
 
     wifi_init();
     display_init();
-
-    // Prime the panel to white so the user sees something even before the
-    // first frame lands. Always a full update so the first image is clean.
-    display_write_planes(s_black_plane, s_red_plane);
-    display_refresh(DISPLAY_UPDATE_FULL);
 
     TickType_t last_display = 0, last_photo = 0;
     while (1) {
