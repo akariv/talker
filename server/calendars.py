@@ -34,6 +34,7 @@ _calendar_cache: dict[str, tuple[float, Optional[icalendar.Calendar]]] = {}
 class CalendarEvent:
     start: datetime
     summary: str
+    end: Optional[datetime] = None
     all_day: bool = False
 
 
@@ -111,22 +112,25 @@ def _apply_filter(occ, filter_str: str, now: datetime,
     start, all_day = _occ_start(occ, tz)
     if start is None:
         return []
+    end = None if all_day else _occ_end(occ, tz, start)
     summary = str(occ.get("SUMMARY", "")).strip()
 
     if filter_str == "trashcan":
-        return _synthesize_trashcan(start, now, tz)
+        return _synthesize_trashcan(start, all_day, now, tz)
 
     # Future-only for non-trashcan filters.
     if start < now:
         return []
 
     if filter_str == "all":
-        return [CalendarEvent(start=start, summary=summary, all_day=all_day)]
+        return [CalendarEvent(start=start, end=end, summary=summary,
+                              all_day=all_day)]
 
     if filter_str.startswith("attendee="):
         wanted = filter_str.split("=", 1)[1].strip().lower()
         if _has_attendee(occ, wanted):
-            return [CalendarEvent(start=start, summary=summary, all_day=all_day)]
+            return [CalendarEvent(start=start, end=end, summary=summary,
+                                  all_day=all_day)]
         return []
 
     log.warning(f"unknown calendar filter: {filter_str!r}")
@@ -147,6 +151,26 @@ def _occ_start(occ, tz: ZoneInfo) -> tuple[Optional[datetime], bool]:
     return None, False
 
 
+def _occ_end(occ, tz: ZoneInfo, start: datetime) -> Optional[datetime]:
+    """End time for a non-all-day VEVENT. Honors DTEND first, falls back
+    to DTSTART + DURATION. Returns None if neither is present (instantaneous
+    event)."""
+    dtend = occ.get("DTEND")
+    if dtend is not None:
+        val = dtend.dt
+        if isinstance(val, datetime):
+            return val.astimezone(tz) if val.tzinfo else val.replace(tzinfo=tz)
+        if isinstance(val, date):
+            return datetime.combine(val, time_obj.min, tzinfo=tz)
+    duration = occ.get("DURATION")
+    if duration is not None:
+        try:
+            return start + duration.dt
+        except Exception:
+            pass
+    return None
+
+
 def _has_attendee(occ, wanted_email: str) -> bool:
     attendees = occ.get("ATTENDEE")
     if attendees is None:
@@ -162,7 +186,7 @@ def _has_attendee(occ, wanted_email: str) -> bool:
     return False
 
 
-def _synthesize_trashcan(start: datetime, now: datetime,
+def _synthesize_trashcan(start: datetime, all_day: bool, now: datetime,
                          tz: ZoneInfo) -> list[CalendarEvent]:
     event_day = start.astimezone(tz).date()
     take_out_from = datetime.combine(
@@ -171,7 +195,7 @@ def _synthesize_trashcan(start: datetime, now: datetime,
         event_day, time_obj(12, 0), tzinfo=tz)
 
     if take_out_from <= now < start:
-        return [CalendarEvent(start=start, summary="take out")]
+        return [CalendarEvent(start=start, summary="take out", all_day=all_day)]
     if start <= now < bring_back_until:
-        return [CalendarEvent(start=start, summary="bring back")]
+        return [CalendarEvent(start=start, summary="bring back", all_day=all_day)]
     return []

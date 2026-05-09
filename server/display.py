@@ -79,10 +79,10 @@ CAL_EVENT_STRIDE = CAL_EVENT_BLOCK_H + CAL_INTER_EVENT_GAP  # 32
 CAL_LEFT_PADDING = 8
 CAL_RIGHT_PADDING = 2
 
-# Bottom-left clock geometry.
-CLOCK_FONT = 14
-CLOCK_X = 4
-CLOCK_BOTTOM_MARGIN = 2
+# Bottom-left date geometry.
+DATE_FONT = 14
+DATE_X = 4
+DATE_BOTTOM_MARGIN = 2
 
 _ICON_DIR = Path(__file__).parent / "weather-icons"
 
@@ -212,8 +212,14 @@ def _draw_weather(black: Image.Image, draw_b: ImageDraw.ImageDraw,
                         size=WEATHER_TEMP_FONT, fill=0)
 
 
-def _format_when(start: datetime, all_day: bool, now: datetime) -> str:
-    """Compact "when" prefix for a calendar line."""
+def _format_when(start: datetime, end: datetime | None,
+                 all_day: bool, now: datetime) -> str:
+    """Compact 'when' prefix for a calendar line.
+
+    All-day events use day-name format ('today', 'tomorrow', 'Mon', ...).
+    Timed events use 'HH:MM - HH:MM' (or just 'HH:MM' when there's no end
+    or the event spans days), preceded by a day prefix when not today.
+    """
     delta = start - now
     minutes = int(delta.total_seconds() // 60)
     if 0 <= minutes < 60:
@@ -228,14 +234,21 @@ def _format_when(start: datetime, all_day: bool, now: datetime) -> str:
             return "today"
         if sd == tomorrow:
             return "tomorrow"
-        return start.strftime("%a")  # Mon, Tue, ...
+        return start.strftime("%a")
 
-    hhmm = start.strftime("%H:%M")
+    # Timed event: build "HH:MM" or "HH:MM - HH:MM".
+    hhmm_start = start.strftime("%H:%M")
+    if end is not None and end.date() == start.date() and end > start:
+        time_part = f"{hhmm_start} - {end.strftime('%H:%M')}"
+    else:
+        # No end, or multi-day span — just show the start time.
+        time_part = hhmm_start
+
     if sd == today:
-        return hhmm
+        return time_part
     if sd == tomorrow:
-        return f"tom {hhmm}"
-    return f"{start.strftime('%a')} {hhmm}"
+        return f"tom {time_part}"
+    return f"{start.strftime('%a')} {time_part}"
 
 
 def _draw_calendar(draw_b: ImageDraw.ImageDraw, draw_r: ImageDraw.ImageDraw,
@@ -260,7 +273,7 @@ def _draw_calendar(draw_b: ImageDraw.ImageDraw, draw_r: ImageDraw.ImageDraw,
 
     for i, ev in enumerate(events[:n]):
         y = y0 + i * CAL_EVENT_STRIDE
-        when = _format_when(ev.start, ev.all_day, now)
+        when = _format_when(ev.start, ev.end, ev.all_day, now)
         _draw_text(draw_b, when, x0, y, CAL_DATE_FONT, fill=0)
 
         title = _truncate_to_width(draw_b, ev.summary, width, CAL_TITLE_FONT)
@@ -272,11 +285,12 @@ def _draw_calendar(draw_b: ImageDraw.ImageDraw, draw_r: ImageDraw.ImageDraw,
             _draw_text(draw_r, title, x0, title_y, CAL_TITLE_FONT, fill=1)
 
 
-def _draw_clock(draw_b: ImageDraw.ImageDraw, x: int, y_bottom: int,
-                now: datetime) -> None:
-    """Small HH:MM with its bottom edge at `y_bottom`, left-aligned to `x`."""
-    _draw_text(draw_b, now.strftime("%H:%M"), x, y_bottom - CLOCK_FONT,
-               size=CLOCK_FONT, fill=0)
+def _draw_date(draw_b: ImageDraw.ImageDraw, x: int, y_bottom: int,
+               now: datetime) -> None:
+    """Small date string ('May 9' / 'Nov 10') anchored at the bottom-left."""
+    text = f"{now:%b} {now.day}"
+    _draw_text(draw_b, text, x, y_bottom - DATE_FONT,
+               size=DATE_FONT, fill=0)
 
 
 # ---------------------------------------------------------------------------
@@ -297,8 +311,8 @@ def render_frame(w: int, h: int, now: datetime) -> bytes:
     # Left column: weather (narrower than before so calendars get more room).
     _draw_weather(black, d_black, column_w=WEATHER_W, now=now)
 
-    # Bottom-left clock, sits inside the weather column below the temp text.
-    _draw_clock(d_black, x=CLOCK_X, y_bottom=h - CLOCK_BOTTOM_MARGIN, now=now)
+    # Bottom-left date, sits inside the weather column below the temp text.
+    _draw_date(d_black, x=DATE_X, y_bottom=h - DATE_BOTTOM_MARGIN, now=now)
 
     # Calendar list — vertically centered in the right column.
     cal_x0 = WEATHER_W + CAL_LEFT_PADDING
