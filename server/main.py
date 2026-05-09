@@ -147,9 +147,7 @@ async def display_frame(request: Request, w: int, h: int):
     if _last_frame_minute.get(cache_key) == minute_key:
         return Response(status_code=204)
 
-    data = display.render_current_time_frame(
-        w, h, now, photo=_last_photo.get(client_name)
-    )
+    data = display.render_frame(w, h, now)
     _last_frame_minute[cache_key] = minute_key
     log.info(f"[{client_name}] display/frame: {len(data)} bytes @ {minute_key}")
     return Response(

@@ -25,6 +25,49 @@ except Exception:
 _mem_clients: dict[str, dict] = {}
 _mem_conversations: dict[str, list[dict]] = defaultdict(list)
 _mem_queue: dict[str, list[dict]] = defaultdict(list)
+_mem_display_config: dict = {}
+
+# Display config (calendar list, etc.) is small and rarely changes.
+# Cache 5 min in-process to avoid a Firestore read on every panel render.
+_DISPLAY_CONFIG_TTL_SECONDS = 300
+_display_config_cache: dict = {"value": None, "fetched_at": 0.0}
+
+
+def get_display_config() -> dict:
+    """Return the panel's display config (currently {'calendars': [...]}).
+
+    Cached for 5 minutes. On Firestore failure we keep returning the
+    previous cached value (stale-on-error). Returns `{}` if no config has
+    ever been seeded.
+    """
+    now = time.monotonic()
+    cached = _display_config_cache
+    if cached["value"] is not None and (now - cached["fetched_at"]) < _DISPLAY_CONFIG_TTL_SECONDS:
+        return cached["value"]
+
+    if not USE_FIRESTORE:
+        return _mem_display_config
+
+    try:
+        doc = _firestore_db.collection("config").document("display").get()
+        cfg = doc.to_dict() if doc.exists else {}
+    except Exception as e:
+        log.warning(f"display config fetch failed: {e}")
+        return cached["value"] or {}
+
+    cached["value"] = cfg
+    cached["fetched_at"] = now
+    return cfg
+
+
+def set_display_config(cfg: dict) -> None:
+    """Overwrite `config/display` in Firestore (or in-memory in dev)."""
+    if USE_FIRESTORE:
+        _firestore_db.collection("config").document("display").set(cfg)
+    else:
+        _mem_display_config.clear()
+        _mem_display_config.update(cfg)
+    _display_config_cache["value"] = None  # invalidate
 
 
 def add_client(name: str, api_key: str, location: str = "", owner: str = "", system_prompt: str = ""):
