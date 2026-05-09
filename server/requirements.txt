@@ -8,3 +8,4 @@ google-cloud-firestore>=2.21
 Pillow>=10
 icalendar>=5
 recurring-ical-events>=2
+python-bidi>=0.4
