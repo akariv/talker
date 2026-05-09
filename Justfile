@@ -67,6 +67,12 @@ install:
 test-live:
     cd tests/live && python generate_audio.py && python test_scenarios.py
 
+# ---- Sim ----
+
+# Serve the display-cam web sim at http://127.0.0.1:<port>/
+sim PORT='5173':
+    cd sim && python3 -m http.server {{PORT}}
+
 # ---- Infra ----
 
 tf-init:

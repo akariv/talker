@@ -8,6 +8,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request, Response, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
 import auth
@@ -20,6 +21,15 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 app = FastAPI(title="Talker Voice Server")
+
+# Allow the browser-based sim under sim/ to call /display/frame from any origin.
+# Auth is via X-Api-Key header (no cookies), so wildcard origin is safe here.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 # Per-client upload buffers for chunked recording
 upload_buffers: dict[str, bytearray] = defaultdict(bytearray)

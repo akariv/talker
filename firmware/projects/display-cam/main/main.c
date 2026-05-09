@@ -1,11 +1,12 @@
 /**
- * display-cam — WiFi-connected SSD1680 clock + periodic OV7670 upload.
+ * display-cam — WiFi-connected SSD1680 clock (+ optional OV7670 upload).
  *
- * Two loops in one task:
+ * Loops (in one task):
  *   15s  GET  /display/frame?w=296&h=128   (landscape; server rotates)
  *              200 → body is 9472 bytes = black plane ‖ red plane (panel native)
  *              204 → no change, skip refresh
  *   60s  POST /display/photo               (raw QVGA grayscale bytes)
+ *              — only when built with WITH_CAMERA defined.
  */
 
 #include <stdbool.h>
@@ -21,16 +22,20 @@
 #include "esp_http_client.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
-#include "driver/ledc.h"
 #include "driver/spi_master.h"
+#ifdef WITH_CAMERA
+#include "driver/ledc.h"
 #include "esp_camera.h"
+#endif
 #include "secrets.h"
 
 static const char *TAG = "display_cam";
 
 // ---- Timing ----
 #define DISPLAY_POLL_INTERVAL_MS  15000
+#ifdef WITH_CAMERA
 #define PHOTO_UPLOAD_INTERVAL_MS  60000
+#endif
 #define SCHED_TICK_MS               500
 
 // ---- SSD1680 refresh modes (arg to cmd 0x22) ----
@@ -64,6 +69,7 @@ static const char *TAG = "display_cam";
 #define SPI_HOST      SPI3_HOST
 #define SPI_CLOCK_HZ  (4 * 1000 * 1000)
 
+#ifdef WITH_CAMERA
 // ---- OV7670 camera pins ----
 #define CAM_PIN_SIOD   33
 #define CAM_PIN_SIOC   25
@@ -85,6 +91,7 @@ static const char *TAG = "display_cam";
 #define CAM_W          320
 #define CAM_H          240
 #define CAM_FRAME_BYTES (CAM_W * CAM_H)  // grayscale, 76800
+#endif
 
 static spi_device_handle_t s_spi;
 static uint8_t *s_black_plane;
@@ -324,6 +331,7 @@ static void display_refresh(uint8_t mode)
 // Camera (per-capture init/deinit)
 // ------------------------------------------------------------------
 
+#ifdef WITH_CAMERA
 static esp_err_t camera_init(void)
 {
     camera_config_t cfg = {
@@ -354,6 +362,7 @@ static esp_err_t camera_init(void)
     };
     return esp_camera_init(&cfg);
 }
+#endif
 
 // ------------------------------------------------------------------
 // /display/frame GET — stream 9472 bytes straight into plane buffers
@@ -439,6 +448,7 @@ static void do_display_poll(void)
 // /display/photo POST — one QVGA grayscale frame, camera init+deinit
 // ------------------------------------------------------------------
 
+#ifdef WITH_CAMERA
 static void do_photo_upload(void)
 {
     ESP_LOGI(TAG, "photo: initializing camera");
@@ -510,6 +520,7 @@ static void do_photo_upload(void)
     ESP_LOGI(TAG, "photo: uploaded %d bytes, status %d (heap: %lu)",
              sent, status, esp_get_free_heap_size());
 }
+#endif
 
 // ------------------------------------------------------------------
 // app_main
@@ -540,7 +551,10 @@ void app_main(void)
     wifi_init();
     display_init();
 
-    TickType_t last_display = 0, last_photo = 0;
+    TickType_t last_display = 0;
+#ifdef WITH_CAMERA
+    TickType_t last_photo = 0;
+#endif
     while (1) {
         TickType_t now = xTaskGetTickCount();
 
@@ -550,11 +564,13 @@ void app_main(void)
                 last_display = now;
                 do_display_poll();
             }
+#ifdef WITH_CAMERA
             if (last_photo == 0 ||
                 (now - last_photo) >= pdMS_TO_TICKS(PHOTO_UPLOAD_INTERVAL_MS)) {
                 last_photo = now;
                 do_photo_upload();
             }
+#endif
         }
 
         vTaskDelay(pdMS_TO_TICKS(SCHED_TICK_MS));

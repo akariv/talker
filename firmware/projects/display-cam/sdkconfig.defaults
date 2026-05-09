@@ -11,3 +11,6 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # full bundle to save ~160 KB RAM.
 CONFIG_ESP_TLS_USING_MBEDTLS=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=n
+# Size-optimize (-Os). IDF default is -Og, which inflates the image
+# by ~100-200 KB. Assertions stay on; flip those separately if desired.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y

@@ -1,0 +1,100 @@
+* { box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #1e1e1e;
+    color: #ddd;
+    margin: 0;
+    padding: 24px;
+}
+
+h1 {
+    margin: 0 0 16px;
+    font-size: 18px;
+    font-weight: 600;
+}
+
+form {
+    max-width: 420px;
+    display: grid;
+    gap: 12px;
+}
+
+label {
+    display: grid;
+    gap: 4px;
+    font-size: 13px;
+    color: #aaa;
+}
+
+input {
+    background: #2a2a2a;
+    border: 1px solid #444;
+    color: #ddd;
+    padding: 8px 10px;
+    font-size: 14px;
+    border-radius: 4px;
+}
+
+input:focus { outline: none; border-color: #6cf; }
+input:read-only { color: #777; }
+
+.row { display: flex; gap: 12px; }
+.row label { flex: 1; }
+
+button {
+    background: #6cf;
+    color: #111;
+    border: 0;
+    padding: 8px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    border-radius: 4px;
+    cursor: pointer;
+}
+button:hover { background: #8df; }
+button:disabled { background: #555; color: #888; cursor: wait; }
+
+.note { font-size: 12px; color: #888; }
+
+a { color: #6cf; }
+
+/* Display sim */
+.toolbar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.toolbar .endpoint {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    color: #aaa;
+    flex: 1;
+}
+
+.canvas-frame {
+    background: white;
+    padding: 8px;
+    border-radius: 4px;
+    display: inline-block;
+}
+
+canvas {
+    width: 888px;
+    height: 384px;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    display: block;
+}
+
+.status {
+    margin-top: 12px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 13px;
+    color: #aaa;
+    min-height: 1.4em;
+}
+.status.error { color: #f88; }
+.status.ok { color: #8f8; }

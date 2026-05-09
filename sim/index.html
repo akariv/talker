@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>display-cam sim — login</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<h1>display-cam sim</h1>
+<form id="loginForm">
+    <label>Server URL
+        <input type="url" name="serverUrl" required
+               placeholder="http://localhost:8080">
+    </label>
+    <label>Client name
+        <input type="text" name="clientName" required autocomplete="username">
+    </label>
+    <label>API key
+        <input type="password" name="apiKey" required
+               autocomplete="current-password">
+    </label>
+    <div class="row">
+        <label>Width
+            <input type="number" name="w" value="296" readonly>
+        </label>
+        <label>Height
+            <input type="number" name="h" value="128" readonly>
+        </label>
+    </div>
+    <button type="submit">Open sim →</button>
+    <p class="note">
+        Stored in sessionStorage. The API key never leaves your browser
+        except to the server URL above.
+    </p>
+</form>
+<script src="sim.js"></script>
+<script>
+(function () {
+    const form = document.getElementById("loginForm");
+    const existing = getSettings();
+    if (existing) {
+        for (const [k, v] of Object.entries(existing)) {
+            const el = form.elements[k];
+            if (el) el.value = v;
+        }
+    }
+    form.addEventListener("submit", (ev) => {
+        ev.preventDefault();
+        const fd = new FormData(form);
+        const s = {
+            serverUrl: String(fd.get("serverUrl")).replace(/\/+$/, ""),
+            clientName: String(fd.get("clientName")).trim(),
+            apiKey: String(fd.get("apiKey")),
+            w: Number(fd.get("w")),
+            h: Number(fd.get("h")),
+        };
+        saveSettings(s);
+        window.location.href = "display.html";
+    });
+})();
+</script>
+</body>
+</html>
