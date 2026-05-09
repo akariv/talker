@@ -32,7 +32,7 @@
 static const char *TAG = "display_cam";
 
 // ---- Timing ----
-#define DISPLAY_POLL_INTERVAL_MS  15000
+#define DISPLAY_POLL_INTERVAL_MS  300000
 #ifdef WITH_CAMERA
 #define PHOTO_UPLOAD_INTERVAL_MS  60000
 #endif
