@@ -1,7 +1,18 @@
 """Open-Meteo client + WMO code mapping for the panel's left tile.
 
-Single in-process cache. Stale-on-error: if a refresh fails and we have
-something cached, we keep returning it past its TTL.
+The cache stores a 'raw' snapshot (today's + tomorrow's high/low, plus
+the current is_day flag and icon). At display time the caller passes in
+`now` (local tz), and we pick the temperature pair to show:
+
+  * day, OR night-but-before-noon  → today's max → today's min
+  * night-after-noon                → tomorrow's min → tomorrow's max
+
+The night-after-noon case is the only one that looks at tomorrow — at,
+say, 03:00 we still want to see today's range because today's high is
+still ahead.
+
+Cache is stale-on-error: a failed refresh keeps returning the previous
+snapshot past TTL.
 """
 
 import json
@@ -9,6 +20,7 @@ import logging
 import time
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime
 
 import config
 
@@ -19,38 +31,64 @@ _OPEN_METEO_URL = (
     "?latitude={lat}&longitude={lon}"
     "&current=weather_code,is_day"
     "&daily=temperature_2m_max,temperature_2m_min"
-    "&timezone={tz}&forecast_days=1"
+    "&timezone={tz}&forecast_days=2"
 )
 
 
 @dataclass(frozen=True)
 class Weather:
+    """The view that the renderer consumes — already-picked first/second."""
     icon: str
-    temp_max: float
-    temp_min: float
+    temp_first: float
+    temp_second: float
+
+
+@dataclass(frozen=True)
+class _RawWeather:
+    icon: str
+    is_day: bool
+    today_max: float
+    today_min: float
+    tomorrow_max: float
+    tomorrow_min: float
 
 
 _cache: dict = {"value": None, "fetched_at": 0.0}
 
 
-def get_weather() -> Weather | None:
-    """Returns the latest weather snapshot, or None if we have never
-    succeeded fetching one."""
-    now = time.monotonic()
-    age = now - _cache["fetched_at"]
+def get_weather(now: datetime) -> Weather | None:
+    """Returns the temperature pair to display, given local time `now`.
+
+    None if we've never had a successful fetch.
+    """
+    raw = _get_or_refresh()
+    if raw is None:
+        return None
+
+    show_tomorrow = (not raw.is_day) and now.hour >= 12
+    if show_tomorrow:
+        first, second = raw.tomorrow_min, raw.tomorrow_max
+    else:
+        first, second = raw.today_max, raw.today_min
+
+    return Weather(icon=raw.icon, temp_first=first, temp_second=second)
+
+
+def _get_or_refresh() -> _RawWeather | None:
+    age = time.monotonic() - _cache["fetched_at"]
     if _cache["value"] is not None and age < config.WEATHER["ttl_seconds"]:
         return _cache["value"]
 
     fresh = _fetch()
     if fresh is not None:
         _cache["value"] = fresh
-        _cache["fetched_at"] = now
+        _cache["fetched_at"] = time.monotonic()
         return fresh
-    # Stale-on-error: return whatever we have, even if past TTL.
+    # Stale-on-error: keep returning whatever we have, even past TTL.
     return _cache["value"]
 
 
-def _fetch() -> Weather | None:
+def _fetch() -> _RawWeather | None:
     url = _OPEN_METEO_URL.format(
         lat=config.WEATHER["lat"],
         lon=config.WEATHER["lon"],
@@ -66,14 +104,19 @@ def _fetch() -> Weather | None:
     try:
         code = int(data["current"]["weather_code"])
         is_day = bool(data["current"]["is_day"])
-        tmax = float(data["daily"]["temperature_2m_max"][0])
-        tmin = float(data["daily"]["temperature_2m_min"][0])
+        tmax = data["daily"]["temperature_2m_max"]
+        tmin = data["daily"]["temperature_2m_min"]
+        return _RawWeather(
+            icon=_icon_for_wmo(code, is_day),
+            is_day=is_day,
+            today_max=float(tmax[0]),
+            today_min=float(tmin[0]),
+            tomorrow_max=float(tmax[1]),
+            tomorrow_min=float(tmin[1]),
+        )
     except (KeyError, IndexError, TypeError, ValueError) as e:
         log.warning(f"weather payload malformed: {e} | {data}")
         return None
-
-    return Weather(icon=_icon_for_wmo(code, is_day),
-                   temp_max=tmax, temp_min=tmin)
 
 
 def _icon_for_wmo(code: int, is_day: bool) -> str:

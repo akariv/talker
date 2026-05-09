@@ -189,9 +189,13 @@ def _truncate_to_width(draw: ImageDraw.ImageDraw, text: str,
 # ---------------------------------------------------------------------------
 
 def _draw_weather(black: Image.Image, draw_b: ImageDraw.ImageDraw,
-                  column_w: int) -> None:
-    """Left column: small weather icon (top) + temp range below."""
-    w = weather.get_weather()
+                  column_w: int, now: datetime) -> None:
+    """Left column: small weather icon (top) + temp range below.
+
+    `now` is the local-tz datetime; weather.get_weather uses it to decide
+    whether to show today's or tomorrow's temperature pair.
+    """
+    w = weather.get_weather(now)
     if w is None:
         _draw_text_centered(draw_b, "—", column_w // 2, 36, 24, fill=0)
         return
@@ -202,7 +206,7 @@ def _draw_weather(black: Image.Image, draw_b: ImageDraw.ImageDraw,
     _paste_icon(black, w.icon, icon_x, icon_y, size=icon_size)
 
     # Temp range a little below the icon.
-    temp_text = f"{round(w.temp_max)}°/{round(w.temp_min)}°"
+    temp_text = f"{round(w.temp_first)}°/{round(w.temp_second)}°"
     _draw_text_centered(draw_b, temp_text, column_w // 2,
                         y=icon_y + icon_size + 6,
                         size=WEATHER_TEMP_FONT, fill=0)
@@ -291,7 +295,7 @@ def render_frame(w: int, h: int, now: datetime) -> bytes:
     d_red = ImageDraw.Draw(red)
 
     # Left column: weather (narrower than before so calendars get more room).
-    _draw_weather(black, d_black, column_w=WEATHER_W)
+    _draw_weather(black, d_black, column_w=WEATHER_W, now=now)
 
     # Bottom-left clock, sits inside the weather column below the temp text.
     _draw_clock(d_black, x=CLOCK_X, y_bottom=h - CLOCK_BOTTOM_MARGIN, now=now)
