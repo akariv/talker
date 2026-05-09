@@ -19,6 +19,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_timer.h"
 #include "esp_http_client.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
@@ -104,6 +105,18 @@ static uint8_t *s_red_plane;
 static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_CONNECTED_BIT BIT0
 
+// Back-off after a disconnect to avoid a tight reconnect loop when the AP
+// is briefly unavailable.
+#define WIFI_RECONNECT_DELAY_US (15ULL * 1000 * 1000)
+
+static esp_timer_handle_t s_wifi_reconnect_timer;
+
+static void wifi_reconnect_cb(void *arg)
+{
+    ESP_LOGI(TAG, "WiFi reconnect timer fired, attempting connect");
+    esp_wifi_connect();
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t base,
                                 int32_t id, void *data)
 {
@@ -111,9 +124,13 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-        ESP_LOGW(TAG, "WiFi disconnected, retrying...");
-        esp_wifi_connect();
+        ESP_LOGW(TAG, "WiFi disconnected, reconnect in 15s");
+        // Stop returns ESP_ERR_INVALID_STATE if not running — ignore.
+        esp_timer_stop(s_wifi_reconnect_timer);
+        esp_timer_start_once(s_wifi_reconnect_timer, WIFI_RECONNECT_DELAY_US);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        // A stray reconnect timer would bounce a working link — kill it.
+        esp_timer_stop(s_wifi_reconnect_timer);
         ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "Connected, IP: " IPSTR, IP2STR(&e->ip_info.ip));
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
@@ -123,6 +140,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
 static void wifi_init(void)
 {
     s_wifi_event_group = xEventGroupCreate();
+
+    const esp_timer_create_args_t reconnect_args = {
+        .callback = &wifi_reconnect_cb,
+        .name = "wifi_reconnect",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&reconnect_args, &s_wifi_reconnect_timer));
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
