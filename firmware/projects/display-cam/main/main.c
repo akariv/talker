@@ -192,7 +192,7 @@ static void ensure_http_client(void)
     esp_http_client_config_t cfg = {
         .url = SERVER_URL,  // overridden per request
         .cert_pem = (const char *)server_root_ca_pem_start,
-        .timeout_ms = 15000,
+        .timeout_ms = 30000,
         .keep_alive_enable = true,
     };
     s_http = esp_http_client_init(&cfg);
