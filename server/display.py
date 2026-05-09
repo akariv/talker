@@ -21,6 +21,7 @@ MSB-first packing (PIL's default for mode '1') matches the panel's
 """
 
 import os
+import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from bidi.algorithm import get_display
 from PIL import Image, ImageDraw, ImageFont
 
 import calendars
+import config
 import weather
 
 # First existing path wins. Dockerfile installs fonts-dejavu-core, so the
@@ -66,8 +68,20 @@ WEATHER_TEMP_FONT = 18
 # Calendar lines: each event renders as two stacked lines.
 CAL_DATE_FONT = 12
 CAL_TITLE_FONT = 16
-CAL_EVENT_BLOCK_H = 32   # date(12) + title(16) + 4px inter-event gap
-CAL_DATE_TO_TITLE = 14   # baseline-ish offset from date row to title row
+CAL_DATE_TO_TITLE = 14    # date-row top → title-row top
+CAL_TITLE_BAND_H = 16     # height occupied by the title row
+CAL_EVENT_BLOCK_H = CAL_DATE_TO_TITLE + CAL_TITLE_BAND_H  # 30
+CAL_INTER_EVENT_GAP = 2
+CAL_EVENT_STRIDE = CAL_EVENT_BLOCK_H + CAL_INTER_EVENT_GAP  # 32
+
+# Horizontal gap between the weather column and the calendar text.
+CAL_LEFT_PADDING = 2
+CAL_RIGHT_PADDING = 2
+
+# Bottom-left clock geometry.
+CLOCK_FONT = 14
+CLOCK_X = 4
+CLOCK_BOTTOM_MARGIN = 2
 
 _ICON_DIR = Path(__file__).parent / "weather-icons"
 
@@ -115,6 +129,19 @@ def _bidi(text: str) -> str:
     in visual order. PIL draws codepoints LTR with no bidi handling, so
     Hebrew without this would appear reversed."""
     return get_display(text) if text else text
+
+
+def _is_rtl(text: str) -> bool:
+    """First-strong-directional heuristic: if the first strongly-directional
+    character is RTL (Hebrew/Arabic/etc.), the whole line is treated as RTL
+    for alignment purposes."""
+    for ch in text:
+        d = unicodedata.bidirectional(ch)
+        if d in ("R", "AL"):
+            return True
+        if d == "L":
+            return False
+    return False
 
 
 def _measure(draw: ImageDraw.ImageDraw, text: str, size: int) -> tuple[int, int]:
@@ -207,30 +234,44 @@ def _format_when(start: datetime, all_day: bool, now: datetime) -> str:
 
 
 def _draw_calendar(draw_b: ImageDraw.ImageDraw, draw_r: ImageDraw.ImageDraw,
-                   x0: int, y0: int, width: int, now: datetime) -> None:
-    """Draw up to 3 events; each event is a date/time line (small black) on
-    top of the title (larger red, ellipsis-truncated to the column width)."""
+                   x0: int, width: int, height: int,
+                   now: datetime) -> None:
+    """Draw up to EVENTS_TO_SHOW events, vertically centered in `height`.
+
+    Each event is two lines:
+      • date/time — small, black, left-aligned
+      • title     — larger, red, truncated; right-aligned for RTL strings,
+                    left-aligned otherwise.
+    """
     events = calendars.get_upcoming_events(now)
     if not events:
         return
 
-    for i, ev in enumerate(events):
-        if i >= 3:
-            break
-        y = y0 + i * CAL_EVENT_BLOCK_H
+    n = min(len(events), config.EVENTS_TO_SHOW)
+    total_h = n * CAL_EVENT_BLOCK_H + (n - 1) * CAL_INTER_EVENT_GAP
+    y0 = max(0, (height - total_h) // 2)
+
+    right_x = x0 + width  # for right-aligning RTL titles
+
+    for i, ev in enumerate(events[:n]):
+        y = y0 + i * CAL_EVENT_STRIDE
         when = _format_when(ev.start, ev.all_day, now)
         _draw_text(draw_b, when, x0, y, CAL_DATE_FONT, fill=0)
 
         title = _truncate_to_width(draw_b, ev.summary, width, CAL_TITLE_FONT)
-        _draw_text(draw_r, title, x0, y + CAL_DATE_TO_TITLE,
-                   CAL_TITLE_FONT, fill=1)
+        title_y = y + CAL_DATE_TO_TITLE
+        if _is_rtl(title):
+            _draw_text_right(draw_r, title, right_x, title_y,
+                             CAL_TITLE_FONT, fill=1)
+        else:
+            _draw_text(draw_r, title, x0, title_y, CAL_TITLE_FONT, fill=1)
 
 
-def _draw_clock(draw_b: ImageDraw.ImageDraw, right_x: int, y: int,
+def _draw_clock(draw_b: ImageDraw.ImageDraw, x: int, y_bottom: int,
                 now: datetime) -> None:
-    """Small HH:MM in the top-right corner."""
-    _draw_text_right(draw_b, now.strftime("%H:%M"), right_x, y,
-                     size=14, fill=0)
+    """Small HH:MM with its bottom edge at `y_bottom`, left-aligned to `x`."""
+    _draw_text(draw_b, now.strftime("%H:%M"), x, y_bottom - CLOCK_FONT,
+               size=CLOCK_FONT, fill=0)
 
 
 # ---------------------------------------------------------------------------
@@ -251,19 +292,13 @@ def render_frame(w: int, h: int, now: datetime) -> bytes:
     # Left column: weather (narrower than before so calendars get more room).
     _draw_weather(black, d_black, column_w=WEATHER_W)
 
-    # Right area geometry.
-    right_x0 = WEATHER_W
-    right_w = w - WEATHER_W
-    right_padding = 6
+    # Bottom-left clock, sits inside the weather column below the temp text.
+    _draw_clock(d_black, x=CLOCK_X, y_bottom=h - CLOCK_BOTTOM_MARGIN, now=now)
 
-    # Top-right clock.
-    _draw_clock(d_black, right_x=w - right_padding, y=2, now=now)
-
-    # Calendar list, leaving room above for the clock.
-    cal_y0 = 20
-    cal_x0 = right_x0 + right_padding
-    cal_w = right_w - 2 * right_padding
-    _draw_calendar(d_black, d_red, cal_x0, cal_y0, cal_w, now)
+    # Calendar list — vertically centered in the right column.
+    cal_x0 = WEATHER_W + CAL_LEFT_PADDING
+    cal_w = w - cal_x0 - CAL_RIGHT_PADDING
+    _draw_calendar(d_black, d_red, cal_x0, cal_w, h, now)
 
     # Rotate 90° CW into panel-native (128, 296).
     black_n = black.rotate(-90, expand=True)

@@ -14,4 +14,4 @@ WEATHER = {
 
 CALENDAR_TTL_SECONDS = 600          # 10-min cache per .ics URL
 EVENT_HORIZON_DAYS = 7              # how far ahead we expand recurring events
-EVENTS_TO_SHOW = 3
+EVENTS_TO_SHOW = 4
