@@ -86,7 +86,9 @@ def _get_calendar(url: str) -> Optional[icalendar.Calendar]:
     # Some iCal hosts (e.g. mijnafvalwijzer) 403 the default Python-urllib UA.
     req = urllib.request.Request(url, headers={"User-Agent": "talker-display/1.0"})
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        # 10s — Google Calendar's iCal endpoint occasionally takes >5s
+        # from Cloud Run egress; a single missed refresh costs us a calendar.
+        with urllib.request.urlopen(req, timeout=10) as resp:
             ctype = resp.headers.get("Content-Type", "").lower()
             if "text/calendar" not in ctype and "text/plain" not in ctype:
                 log.warning(
