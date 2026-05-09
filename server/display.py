@@ -75,7 +75,8 @@ CAL_INTER_EVENT_GAP = 2
 CAL_EVENT_STRIDE = CAL_EVENT_BLOCK_H + CAL_INTER_EVENT_GAP  # 32
 
 # Horizontal gap between the weather column and the calendar text.
-CAL_LEFT_PADDING = 2
+# Was 6; +2 per the layout pass.
+CAL_LEFT_PADDING = 8
 CAL_RIGHT_PADDING = 2
 
 # Bottom-left clock geometry.
