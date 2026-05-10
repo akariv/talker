@@ -197,8 +197,9 @@ def _synthesize_trashcan(start: datetime, all_day: bool, now: datetime,
         event_day, time_obj(12, 0), tzinfo=tz)
 
     label = summary.strip()
-    take_out = f"take out: {label}" if label else "take out"
-    bring_back = f"bring back: {label}" if label else "bring back"
+    # ⌂→♻ = "from house, out to recycling"; ♻→⌂ = "from recycling, back home".
+    take_out = f"⌂→♻ {label}".rstrip()
+    bring_back = f"♻→⌂ {label}".rstrip()
 
     if take_out_from <= now < start:
         return [CalendarEvent(start=start, summary=take_out, all_day=all_day)]
