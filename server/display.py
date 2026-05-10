@@ -121,7 +121,7 @@ def _paste_icon(black: Image.Image, name: str, x: int, y: int,
     if size != src.size[0]:
         bg = bg.resize((size, size), Image.LANCZOS)
     gray = bg.convert("L")
-    ink_mask = gray.point(lambda v: 255 if v < 128 else 0).convert("1")
+    ink_mask = gray.point(lambda v: 255 if v < 64 else 0).convert("1")
     black.paste(0, (x, y), ink_mask)
 
 
