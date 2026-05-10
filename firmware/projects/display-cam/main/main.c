@@ -110,6 +110,7 @@ static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_RECONNECT_DELAY_US (15ULL * 1000 * 1000)
 
 static esp_timer_handle_t s_wifi_reconnect_timer;
+static int s_wifi_reconnect_timer_used = 0;
 
 static void wifi_reconnect_cb(void *arg)
 {
@@ -127,7 +128,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         ESP_LOGW(TAG, "WiFi disconnected, reconnect in 15s");
         // Stop returns ESP_ERR_INVALID_STATE if not running — ignore.
         esp_timer_stop(s_wifi_reconnect_timer);
-        esp_timer_start_once(s_wifi_reconnect_timer, WIFI_RECONNECT_DELAY_US);
+        esp_timer_start_once(s_wifi_reconnect_timer, s_wifi_reconnect_timer_used ? WIFI_RECONNECT_DELAY_US : 0);
+        s_wifi_reconnect_timer_used = 1;
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         // A stray reconnect timer would bounce a working link — kill it.
         esp_timer_stop(s_wifi_reconnect_timer);
