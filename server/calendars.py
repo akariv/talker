@@ -118,7 +118,7 @@ def _apply_filter(occ, filter_str: str, now: datetime,
     summary = str(occ.get("SUMMARY", "")).strip()
 
     if filter_str == "trashcan":
-        return _synthesize_trashcan(start, all_day, now, tz)
+        return _synthesize_trashcan(start, all_day, now, tz, summary)
 
     # Future-only for non-trashcan filters.
     if start < now:
@@ -189,15 +189,19 @@ def _has_attendee(occ, wanted_email: str) -> bool:
 
 
 def _synthesize_trashcan(start: datetime, all_day: bool, now: datetime,
-                         tz: ZoneInfo) -> list[CalendarEvent]:
+                         tz: ZoneInfo, summary: str) -> list[CalendarEvent]:
     event_day = start.astimezone(tz).date()
     take_out_from = datetime.combine(
         event_day - timedelta(days=1), time_obj(19, 0), tzinfo=tz)
     bring_back_until = datetime.combine(
         event_day, time_obj(12, 0), tzinfo=tz)
 
+    label = summary.strip()
+    take_out = f"take out: {label}" if label else "take out"
+    bring_back = f"bring back: {label}" if label else "bring back"
+
     if take_out_from <= now < start:
-        return [CalendarEvent(start=start, summary="take out", all_day=all_day)]
+        return [CalendarEvent(start=start, summary=take_out, all_day=all_day)]
     if start <= now < bring_back_until:
-        return [CalendarEvent(start=start, summary="bring back", all_day=all_day)]
+        return [CalendarEvent(start=start, summary=bring_back, all_day=all_day)]
     return []
