@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from bidi.algorithm import get_display
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont
 
 import calendars
 import config
@@ -65,6 +65,15 @@ WEATHER_W = 77
 WEATHER_ICON_SIZE = 60
 WEATHER_TEMP_FONT = 18
 WEATHER_TEMP_Y = 62  # fixed; doesn't shift with icon size
+
+# Icon binarization: gamma-darken midtones, then hard-threshold. The gamma
+# pass rescues light-gray detail (e.g., the inner cloud in the overcast
+# icon) that would otherwise be dropped by the threshold.
+ICON_GAMMA = 1.7
+ICON_THRESHOLD = 128
+_ICON_GAMMA_LUT = [
+    int(round(255 * (v / 255) ** ICON_GAMMA)) for v in range(256)
+]
 
 # Calendar lines: each event renders as two stacked lines.
 CAL_DATE_FONT = 12
@@ -109,21 +118,21 @@ def _load_icon(name: str) -> Image.Image:
 
 def _paste_icon(black: Image.Image, name: str, x: int, y: int,
                 size: int = 64) -> None:
-    """Paint `<name>.png` into the black plane at (x,y) with dithering.
+    """Paint `<name>.png` into the black plane at (x,y).
 
     The icon is alpha-composited onto white, optionally resized to
-    `size`×`size` (Lanczos), then Floyd-Steinberg dithered to 1-bit so
-    mid-gray regions render as patterns rather than getting clipped to
-    pure black or white.
+    `size`×`size` (Lanczos), gamma-darkened, then thresholded to 1-bit.
+    The gamma pass keeps light-gray strokes legible after thresholding.
     """
     src = _load_icon(name)
     bg = Image.new("RGB", src.size, "white")
     bg.paste(src, (0, 0), src)
     if size != src.size[0]:
         bg = bg.resize((size, size), Image.LANCZOS)
-    # Invert before dithering so dark icon pixels (ink) become set bits
-    # in the mask used by paste().
-    ink_mask = ImageOps.invert(bg.convert("L")).convert("1")
+    darkened = bg.convert("L").point(_ICON_GAMMA_LUT)
+    ink_mask = darkened.point(
+        lambda v: 255 if v < ICON_THRESHOLD else 0
+    ).convert("1")
     black.paste(0, (x, y), ink_mask)
 
 
