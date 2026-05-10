@@ -9,9 +9,9 @@ WEATHER = {
     "lat": 52.31,                   # Amstelveen
     "lon": 4.87,
     "tz": "Europe/Amsterdam",
-    "ttl_seconds": 1800,            # 30-min cache
+    "ttl_seconds": 300,             # 5-min cache; longer is wasted past idle
 }
 
-CALENDAR_TTL_SECONDS = 600          # 10-min cache per .ics URL
+CALENDAR_TTL_SECONDS = 300          # 5-min cache per .ics URL
 EVENT_HORIZON_DAYS = 7              # how far ahead we expand recurring events
 EVENTS_TO_SHOW = 4

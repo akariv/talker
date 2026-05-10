@@ -185,6 +185,25 @@ extern const uint8_t server_root_ca_pem_end[]   asm("_binary_server_root_ca_pem_
 
 static esp_http_client_handle_t s_http = NULL;
 
+// Last X-Frame-Hash committed for /display/frame. Empty on cold boot;
+// echoed back as ?hash= so the server can 204 unchanged frames.
+static char s_frame_hash[17] = "";
+// Hash captured from the in-flight response; promoted to s_frame_hash
+// only after the frame body has been read + drawn successfully.
+static char s_pending_frame_hash[17] = "";
+
+static esp_err_t http_event_handler(esp_http_client_event_t *evt)
+{
+    if (evt->event_id == HTTP_EVENT_ON_HEADER &&
+        evt->header_key && evt->header_value &&
+        strcasecmp(evt->header_key, "X-Frame-Hash") == 0) {
+        strncpy(s_pending_frame_hash, evt->header_value,
+                sizeof(s_pending_frame_hash) - 1);
+        s_pending_frame_hash[sizeof(s_pending_frame_hash) - 1] = '\0';
+    }
+    return ESP_OK;
+}
+
 static void ensure_http_client(void)
 {
     if (s_http != NULL) return;
@@ -194,6 +213,7 @@ static void ensure_http_client(void)
         .cert_pem = (const char *)server_root_ca_pem_start,
         .timeout_ms = 30000,
         .keep_alive_enable = true,
+        .event_handler = http_event_handler,
     };
     s_http = esp_http_client_init(&cfg);
     esp_http_client_set_header(s_http, "X-Client-Name", CLIENT_NAME);
@@ -396,11 +416,17 @@ static void do_display_poll(void)
     ensure_http_client();
 
     char url[256];
-    snprintf(url, sizeof(url), "%s/display/frame?w=%d&h=%d",
-             SERVER_URL, LOGICAL_W, LOGICAL_H);
+    if (s_frame_hash[0] != '\0') {
+        snprintf(url, sizeof(url), "%s/display/frame?w=%d&h=%d&hash=%s",
+                 SERVER_URL, LOGICAL_W, LOGICAL_H, s_frame_hash);
+    } else {
+        snprintf(url, sizeof(url), "%s/display/frame?w=%d&h=%d",
+                 SERVER_URL, LOGICAL_W, LOGICAL_H);
+    }
     esp_http_client_set_url(s_http, url);
     esp_http_client_set_method(s_http, HTTP_METHOD_GET);
 
+    s_pending_frame_hash[0] = '\0';
     esp_err_t err = esp_http_client_open(s_http, 0);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "GET /display/frame open failed: %s", esp_err_to_name(err));
@@ -461,10 +487,19 @@ static void do_display_poll(void)
                        : DISPLAY_UPDATE_FAST;
     s_refresh_count++;
 
-    ESP_LOGI(TAG, "display: refresh #%d mode=0x%02X (heap: %lu)",
-             s_refresh_count, mode, esp_get_free_heap_size());
+    ESP_LOGI(TAG, "display: refresh #%d mode=0x%02X hash=%s (heap: %lu)",
+             s_refresh_count, mode,
+             s_pending_frame_hash[0] ? s_pending_frame_hash : "?",
+             esp_get_free_heap_size());
     display_write_planes(s_black_plane, s_red_plane);
     display_refresh(mode);
+
+    // Commit the new hash only now — if any of the reads above bailed
+    // out, s_frame_hash stays at its old value so the next poll forces
+    // another fresh frame.
+    if (s_pending_frame_hash[0] != '\0') {
+        strcpy(s_frame_hash, s_pending_frame_hash);
+    }
 }
 
 // ------------------------------------------------------------------

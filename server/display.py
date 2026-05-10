@@ -20,6 +20,8 @@ MSB-first packing (PIL's default for mode '1') matches the panel's
 `0x80 >> (x & 7)` bit layout.
 """
 
+import hashlib
+import json
 import os
 import unicodedata
 from datetime import datetime, timedelta
@@ -307,6 +309,41 @@ def _draw_date(draw_b: ImageDraw.ImageDraw, x: int, y_bottom: int,
 # ---------------------------------------------------------------------------
 # Public entry
 # ---------------------------------------------------------------------------
+
+def _render_inputs(now: datetime) -> dict:
+    w = weather.get_weather(now)
+    weather_part = None
+    if w is not None:
+        weather_part = {
+            "icon": w.icon,
+            "first": round(w.temp_first),
+            "second": round(w.temp_second),
+        }
+    events_part = [
+        {
+            "when": _format_when(ev.start, ev.end, ev.all_day, now),
+            "summary": ev.summary,
+        }
+        for ev in calendars.get_upcoming_events(now)
+    ]
+    return {
+        "date": f"{now:%b} {now.day}",
+        "weather": weather_part,
+        "events": events_part,
+    }
+
+
+def render_inputs_hash(now: datetime) -> str:
+    """16-char hex digest of what `render_frame` would draw at `now`.
+
+    Stable across processes: depends only on the data the renderer
+    consumes (date label, rounded weather, formatted event list). Two
+    `now`s that produce identical pixels yield identical hashes.
+    """
+    blob = json.dumps(_render_inputs(now), sort_keys=True,
+                      ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
 
 def render_frame(w: int, h: int, now: datetime) -> bytes:
     """Render a landscape frame and rotate into panel-native scan order."""

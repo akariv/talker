@@ -113,9 +113,6 @@ async def poll(request: Request):
         return Response(status_code=503)
 
 
-# Per-(client,w,h) minute key of the last frame served, for 204 short-circuit.
-_last_frame_minute: dict[tuple[str, int, int], str] = {}
-
 # Latest camera capture per client: (grayscale_bytes, width, height).
 _last_photo: dict[str, tuple[bytes, int, int]] = {}
 
@@ -125,12 +122,15 @@ _PHOTO_DIR = Path(__file__).parent.parent#os.environ.get("DISPLAY_CAM_PHOTO_DIR"
 
 
 @app.get("/display/frame")
-async def display_frame(request: Request, w: int, h: int):
+async def display_frame(request: Request, w: int, h: int,
+                        hash: str | None = None):
     """Serve a tri-color e-ink frame for the given logical (landscape) size.
 
-    Returns 204 when the cached minute-key is unchanged, 400 on an
-    unsupported (w, h), otherwise 200 with `black_plane ‖ red_plane`
-    already in panel-native scan order (9 472 bytes for 128×296 panels).
+    The client echoes the last `X-Frame-Hash` it received as `?hash=`;
+    when it matches the current render-input fingerprint we return 204
+    (no render runs). Otherwise: 200 with `black_plane ‖ red_plane`
+    in panel-native scan order (9 472 bytes for 128×296), and the new
+    fingerprint in the `X-Frame-Hash` response header.
     """
     client_name = await auth.authenticate(request)
 
@@ -142,18 +142,19 @@ async def display_frame(request: Request, w: int, h: int):
         )
 
     now = datetime.now(ZoneInfo("Europe/Berlin"))
-    minute_key = now.strftime("%Y%m%dT%H%M")
-    cache_key = (client_name, w, h)
-    if _last_frame_minute.get(cache_key) == minute_key:
+    fingerprint = display.render_inputs_hash(now)
+    if hash == fingerprint:
         return Response(status_code=204)
 
     data = display.render_frame(w, h, now)
-    _last_frame_minute[cache_key] = minute_key
-    log.info(f"[{client_name}] display/frame: {len(data)} bytes @ {minute_key}")
+    log.info(f"[{client_name}] display/frame: {len(data)} bytes hash={fingerprint}")
     return Response(
         content=data,
         media_type="application/octet-stream",
-        headers={"Content-Length": str(len(data))},
+        headers={
+            "Content-Length": str(len(data)),
+            "X-Frame-Hash": fingerprint,
+        },
     )
 
 
