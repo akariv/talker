@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from bidi.algorithm import get_display
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 import calendars
 import config
@@ -62,8 +62,9 @@ LANDSCAPE_H = PANEL_NATIVE_W  # 128
 # Weather column width — about 60% of the panel height. Leaves a wider
 # right column for calendar entries.
 WEATHER_W = 77
-WEATHER_ICON_SIZE = 48
+WEATHER_ICON_SIZE = 60
 WEATHER_TEMP_FONT = 18
+WEATHER_TEMP_Y = 62  # fixed; doesn't shift with icon size
 
 # Calendar lines: each event renders as two stacked lines.
 CAL_DATE_FONT = 12
@@ -108,20 +109,21 @@ def _load_icon(name: str) -> Image.Image:
 
 def _paste_icon(black: Image.Image, name: str, x: int, y: int,
                 size: int = 64) -> None:
-    """Paint the dark pixels of `<name>.png` into the black plane at (x,y).
+    """Paint `<name>.png` into the black plane at (x,y) with dithering.
 
     The icon is alpha-composited onto white, optionally resized to
-    `size`×`size` (Lanczos), then thresholded; any pixel darker than mid-
-    gray becomes panel black (0 in the '1'-mode plane), the rest stays
-    white (1).
+    `size`×`size` (Lanczos), then Floyd-Steinberg dithered to 1-bit so
+    mid-gray regions render as patterns rather than getting clipped to
+    pure black or white.
     """
     src = _load_icon(name)
     bg = Image.new("RGB", src.size, "white")
     bg.paste(src, (0, 0), src)
     if size != src.size[0]:
         bg = bg.resize((size, size), Image.LANCZOS)
-    gray = bg.convert("L")
-    ink_mask = gray.point(lambda v: 255 if v < 64 else 0).convert("1")
+    # Invert before dithering so dark icon pixels (ink) become set bits
+    # in the mask used by paste().
+    ink_mask = ImageOps.invert(bg.convert("L")).convert("1")
     black.paste(0, (x, y), ink_mask)
 
 
@@ -202,13 +204,13 @@ def _draw_weather(black: Image.Image, draw_b: ImageDraw.ImageDraw,
 
     icon_size = WEATHER_ICON_SIZE
     icon_x = (column_w - icon_size) // 2
-    icon_y = 8
+    icon_y = 0
     _paste_icon(black, w.icon, icon_x, icon_y, size=icon_size)
 
-    # Temp range a little below the icon.
+    # Temp range at a fixed y so it stays put if the icon resizes.
     temp_text = f"{round(w.temp_first)}°/{round(w.temp_second)}°"
     _draw_text_centered(draw_b, temp_text, column_w // 2,
-                        y=icon_y + icon_size + 6,
+                        y=WEATHER_TEMP_Y,
                         size=WEATHER_TEMP_FONT, fill=0)
 
 
