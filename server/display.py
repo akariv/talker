@@ -367,9 +367,11 @@ def render_frame(w: int, h: int, now: datetime) -> bytes:
     cal_w = w - cal_x0 - CAL_RIGHT_PADDING
     _draw_calendar(d_black, d_red, cal_x0, cal_w, h, now)
 
-    # Rotate 90° CW into panel-native (128, 296).
-    black_n = black.rotate(-90, expand=True)
-    red_n = red.rotate(-90, expand=True)
+    # Rotate into panel-native (128, 296). The panel is mounted upside down
+    # relative to the original orientation, so rotate 90° CCW (equivalent to
+    # the old 90° CW followed by a 180° flip).
+    black_n = black.rotate(90, expand=True)
+    red_n = red.rotate(90, expand=True)
     assert black_n.size == (PANEL_NATIVE_W, PANEL_NATIVE_H)
 
     return black_n.tobytes() + red_n.tobytes()

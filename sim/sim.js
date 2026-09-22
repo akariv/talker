@@ -7,8 +7,9 @@
 // Bit conventions (server display.py):
 //   black plane: 1 = white, 0 = black
 //   red   plane: 1 = red,   0 = transparent
-// Server rotates 90° CW into native, so to recover landscape:
-//   native (xN, yN)  ↔  landscape (yN, 127 − xN)
+// Server rotates 90° CCW into native (panel is mounted upside down), so to
+// recover landscape:
+//   native (xN, yN)  ↔  landscape (295 − yN, xN)
 
 const NATIVE_W = 128;
 const NATIVE_H = 296;
@@ -43,11 +44,11 @@ function decodeFrameInto(bytes, imageData) {
     const H = NATIVE_W;  // 128 — landscape height
 
     for (let yL = 0; yL < H; yL++) {
-        const xN = (NATIVE_W - 1) - yL;            // 127 − yL
+        const xN = yL;
         const byteCol = xN >> 3;
         const mask = 0x80 >> (xN & 7);
         for (let xL = 0; xL < W; xL++) {
-            const yN = xL;
+            const yN = (NATIVE_H - 1) - xL;        // 295 − xL
             const byteIdx = yN * ROW_BYTES + byteCol;
             const isWhite = (black[byteIdx] & mask) !== 0;
             const isRed = (red[byteIdx] & mask) !== 0;
