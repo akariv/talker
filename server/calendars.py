@@ -5,6 +5,11 @@ Three filter modes (config.CALENDARS[i]["filter"]):
   * "attendee=<email>"  — keep occurrences where <email> is on ATTENDEE
   * "trashcan"          — synthesise "take out" / "bring back" pseudo-events
                           based on the current time vs each occurrence
+  * "school=<name>"     — treat the feed as a lesson timetable: lessons are
+                          grouped per day into one "<name>: HH:MM → HH:MM"
+                          line (first lesson start → last lesson end), shown
+                          from 19:00 the evening before until school starts,
+                          then "<name>: → HH:MM" while school is in session
 
 Each calendar's parsed result is cached for CALENDAR_TTL_SECONDS; refreshes
 that fail leave the previous cache value in place (stale-on-error).
@@ -60,14 +65,21 @@ def get_upcoming_events(now: datetime) -> list[CalendarEvent]:
             continue
 
         flt = entry.get("filter", "all")
-        # Look 12h into the past for trashcan calendars so we still see
-        # this morning's pickup while the bring-back window is open.
-        window_start = now - timedelta(hours=12) if flt == "trashcan" else now
+        # Look 12h into the past for trashcan/school calendars so we still
+        # see this morning's occurrence while its "in progress" window is open.
+        looks_back = flt == "trashcan" or flt.startswith("school=")
+        window_start = now - timedelta(hours=12) if looks_back else now
 
         try:
             occurrences = recurring_ical_events.of(cal).between(window_start, horizon)
         except Exception as e:
             log.warning(f"calendar {entry['name']}: expand failed: {e}")
+            continue
+
+        if flt.startswith("school="):
+            name = flt.split("=", 1)[1].strip()
+            for start, end in _school_day_spans(occurrences, tz):
+                out.extend(_synthesize_school(start, end, now, tz, name))
             continue
 
         for occ in occurrences:
@@ -89,14 +101,17 @@ def _get_calendar(url: str) -> Optional[icalendar.Calendar]:
         # 10s — Google Calendar's iCal endpoint occasionally takes >5s
         # from Cloud Run egress; a single missed refresh costs us a calendar.
         with urllib.request.urlopen(req, timeout=10) as resp:
-            ctype = resp.headers.get("Content-Type", "").lower()
-            if "text/calendar" not in ctype and "text/plain" not in ctype:
+            body = resp.read()
+            # Sniff the body rather than trusting Content-Type: some hosts
+            # (e.g. Zermelo) send iCal with no Content-Type at all.
+            if not body.lstrip(b"\xef\xbb\xbf \r\n\t").startswith(b"BEGIN:VCALENDAR"):
+                ctype = resp.headers.get("Content-Type", "").lower()
                 log.warning(
                     f"calendar fetch: not an iCal feed (Content-Type={ctype!r}) "
                     f"for {url} — looks like a calendar UI URL, not the "
                     f"'Secret address in iCal format'.")
                 return cached[1] if cached else None
-            cal = icalendar.Calendar.from_ical(resp.read())
+            cal = icalendar.Calendar.from_ical(body)
     except Exception as e:
         # Truncate so a megabyte of HTML in a parse error doesn't flood logs.
         msg = repr(e)
@@ -205,4 +220,49 @@ def _synthesize_trashcan(start: datetime, all_day: bool, now: datetime,
         return [CalendarEvent(start=start, summary=take_out, all_day=all_day)]
     if start <= now < bring_back_until:
         return [CalendarEvent(start=start, summary=bring_back, all_day=all_day)]
+    return []
+
+
+def _school_day_spans(occurrences, tz: ZoneInfo) -> list[tuple[datetime, datetime]]:
+    """Collapse a lesson timetable into one (first start, last end) span per
+    local day. All-day and open-ended entries are ignored."""
+    spans: dict[date, tuple[datetime, datetime]] = {}
+    for occ in occurrences:
+        start, all_day = _occ_start(occ, tz)
+        if start is None or all_day:
+            continue
+        end = _occ_end(occ, tz, start)
+        if end is None or end <= start:
+            continue
+        day = start.date()
+        if day in spans:
+            s0, e0 = spans[day]
+            spans[day] = (min(s0, start), max(e0, end))
+        else:
+            spans[day] = (start, end)
+    return [spans[d] for d in sorted(spans)]
+
+
+def _synthesize_school(start: datetime, end: datetime, now: datetime,
+                       tz: ZoneInfo, name: str) -> list[CalendarEvent]:
+    """One line per school day, shown as an all-day item so the "when" prefix
+    reads today/tomorrow while the title carries the hours.
+
+      19:00 the evening before .. start:  "<name>: HH:MM → HH:MM"
+      start .. end:                       "<name>: → HH:MM"
+    """
+    event_day = start.astimezone(tz).date()
+    show_from = datetime.combine(
+        event_day - timedelta(days=1), time_obj(19, 0), tzinfo=tz)
+
+    hh_start = start.astimezone(tz).strftime("%H:%M")
+    hh_end = end.astimezone(tz).strftime("%H:%M")
+    prefix = f"{name}: " if name else ""
+
+    if show_from <= now < start:
+        return [CalendarEvent(start=start, all_day=True,
+                              summary=f"{prefix}{hh_start} → {hh_end}")]
+    if start <= now < end:
+        return [CalendarEvent(start=start, all_day=True,
+                              summary=f"{prefix}→ {hh_end}")]
     return []
